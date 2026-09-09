@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import VDICore
 
 var port: UInt16 = 9876
@@ -8,6 +8,9 @@ if let portIndex = args.firstIndex(of: "--port"), portIndex + 1 < args.count,
    let customPort = UInt16(args[portIndex + 1]) {
     port = customPort
 }
+
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
 
 PermissionManager.ensurePermissions()
 
@@ -30,4 +33,4 @@ do {
     exit(1)
 }
 
-RunLoop.main.run()
+app.run()

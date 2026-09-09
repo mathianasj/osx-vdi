@@ -7,6 +7,10 @@ let package = Package(
     platforms: [
         .macOS(.v14)
     ],
+    products: [
+        .executable(name: "vdi-server", targets: ["VDIServer"]),
+        .executable(name: "vdi-client", targets: ["VDIClient"]),
+    ],
     targets: [
         .target(
             name: "VDICore"
