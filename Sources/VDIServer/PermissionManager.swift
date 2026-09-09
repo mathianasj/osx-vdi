@@ -1,7 +1,17 @@
 import Foundation
 import CoreGraphics
+import AppKit
 
 final class PermissionManager {
+    static func checkAccessibilityPermission() -> Bool {
+        AXIsProcessTrusted()
+    }
+
+    static func requestAccessibilityPermission() -> Bool {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+        return AXIsProcessTrustedWithOptions(options)
+    }
+
     static func checkScreenCapturePermission() -> Bool {
         CGPreflightScreenCaptureAccess()
     }
@@ -26,6 +36,13 @@ final class PermissionManager {
         if !granted {
             print("Screen recording permission was denied. Exiting.")
             exit(1)
+        }
+
+        if !checkAccessibilityPermission() {
+            print("")
+            print("Accessibility permission is recommended for input forwarding.")
+            print("Go to: System Settings > Privacy & Security > Accessibility")
+            _ = requestAccessibilityPermission()
         }
     }
 }

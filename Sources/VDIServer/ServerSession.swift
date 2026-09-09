@@ -8,22 +8,25 @@ final class ServerSession {
     enum State {
         case waitingForHello
         case connected
-        case streaming(windowID: UInt32)
         case disconnected
+    }
+
+    private struct WindowStream {
+        let capture: WindowCaptureSession
+        let encoder: VideoEncoder
+        var info: WindowInfo
+        var frameNumber: UInt32 = 0
+        var isSending = false
     }
 
     private let connection: NWConnection
     private let windowManager: WindowManager
     private let decoder = StreamDecoder()
     private let queue = DispatchQueue(label: "com.osx-vdi.server-session")
+    private let inputHandler = InputHandler()
 
     private var state: State = .waitingForHello
-    private let inputHandler = InputHandler()
-    private var captureSession: WindowCaptureSession?
-    private var encoder: VideoEncoder?
-    private var frameNumber: UInt32 = 0
-    private var isSending = false
-    private var activeWindowInfo: WindowInfo?
+    private var streams: [UInt32: WindowStream] = [:]
 
     init(connection: NWConnection, windowManager: WindowManager) {
         self.connection = connection
@@ -59,28 +62,27 @@ final class ServerSession {
     }
 
     private func handleControlMessage(_ message: ControlMessage) {
-        switch (state, message) {
-        case (.waitingForHello, .hello):
+        switch message {
+        case .hello where state == .waitingForHello:
             state = .connected
             send(.helloResponse(version: "1.0", serverName: Host.current().localizedName ?? "VDI Server"))
             Task { await sendWindowList() }
 
-        case (.connected, .selectWindow(let windowID)):
-            Task { await startStreaming(windowID: windowID) }
-
-        case (.streaming, .inputEvent(let inputEvent)):
-            if let windowInfo = activeWindowInfo {
-                inputHandler.handle(inputEvent, windowInfo: windowInfo)
+        case .selectWindow(let windowID) where state == .connected || !streams.isEmpty:
+            if streams[windowID] == nil {
+                Task { await startStreaming(windowID: windowID) }
             }
 
-        case (.streaming, .requestKeyframe):
-            encoder?.forceKeyframe()
+        case .deselectWindow(let windowID):
+            Task { await stopStreaming(windowID: windowID) }
 
-        case (.streaming, .selectWindow(let windowID)):
-            Task {
-                await stopStreaming()
-                await startStreaming(windowID: windowID)
+        case .inputEvent(let inputEvent):
+            if let stream = streams[inputEvent.windowID] {
+                inputHandler.handle(inputEvent, windowInfo: stream.info)
             }
+
+        case .requestKeyframe(let windowID):
+            streams[windowID]?.encoder.forceKeyframe()
 
         default:
             break
@@ -107,7 +109,6 @@ final class ServerSession {
             let height = Int(scWindow.frame.height)
 
             let encoder = try VideoEncoder(width: width, height: height)
-            self.encoder = encoder
 
             encoder.onEncodedFrame = { [weak self] nalData, isKeyframe, pts, sps, pps in
                 self?.handleEncodedFrame(
@@ -121,22 +122,18 @@ final class ServerSession {
             }
 
             let capture = WindowCaptureSession(window: scWindow, width: width, height: height)
-            self.captureSession = capture
 
             capture.onFrame = { [weak encoder] sampleBuffer in
                 encoder?.encode(sampleBuffer: sampleBuffer)
             }
 
             capture.onError = { [weak self] error in
-                self?.send(.error("Capture error: \(error.localizedDescription)"))
-                Task { await self?.stopStreaming() }
+                self?.send(.error("Capture error for window \(windowID): \(error.localizedDescription)"))
+                Task { await self?.stopStreaming(windowID: windowID) }
             }
 
-            try await capture.start()
-            state = .streaming(windowID: windowID)
-
             let app = scWindow.owningApplication
-            activeWindowInfo = WindowInfo(
+            let info = WindowInfo(
                 windowID: windowID,
                 title: scWindow.title,
                 appName: app?.applicationName,
@@ -146,47 +143,52 @@ final class ServerSession {
                 windowLayer: scWindow.windowLayer
             )
 
+            try await capture.start()
+            streams[windowID] = WindowStream(capture: capture, encoder: encoder, info: info)
             send(.streamStarted(windowID: windowID, width: width, height: height))
         } catch {
             send(.error("Failed to start streaming: \(error.localizedDescription)"))
         }
     }
 
-    private func stopStreaming() async {
-        try? await captureSession?.stop()
-        captureSession = nil
-        encoder = nil
-        frameNumber = 0
+    private func stopStreaming(windowID: UInt32) async {
+        guard let stream = streams.removeValue(forKey: windowID) else { return }
+        try? await stream.capture.stop()
+        send(.streamStopped(windowID: windowID))
+    }
 
-        if case .streaming(let windowID) = state {
-            state = .connected
-            send(.streamStopped(windowID: windowID))
+    private func stopAllStreams() async {
+        let windowIDs = Array(streams.keys)
+        for windowID in windowIDs {
+            await stopStreaming(windowID: windowID)
         }
     }
 
     private func handleEncodedFrame(nalData: Data, isKeyframe: Bool, timestamp: CMTime, sps: Data?, pps: Data?, windowID: UInt32) {
-        guard case .streaming = state else { return }
+        guard state != .disconnected else { return }
+        guard var stream = streams[windowID] else { return }
 
-        if isSending && !isKeyframe {
+        if stream.isSending && !isKeyframe {
             return
         }
 
         let header = VideoFrameHeader(
             windowID: windowID,
-            frameNumber: frameNumber,
+            frameNumber: stream.frameNumber,
             flags: isKeyframe ? 0x01 : 0x00,
             timestamp: UInt64(timestamp.value),
             payloadSize: UInt32(nalData.count),
             spsSize: UInt16(sps?.count ?? 0),
             ppsSize: UInt16(pps?.count ?? 0)
         )
-        frameNumber += 1
+        stream.frameNumber += 1
+        stream.isSending = true
+        streams[windowID] = stream
 
         let data = MessageCodec.encode(videoHeader: header, sps: sps, pps: pps, payload: nalData)
 
-        isSending = true
         connection.send(content: data, completion: .contentProcessed { [weak self] _ in
-            self?.isSending = false
+            self?.streams[windowID]?.isSending = false
         })
     }
 
@@ -196,11 +198,9 @@ final class ServerSession {
     }
 
     func disconnect() {
-        guard case .disconnected = state else {
-            state = .disconnected
-            Task { await stopStreaming() }
-            connection.cancel()
-            return
-        }
+        guard state != .disconnected else { return }
+        state = .disconnected
+        Task { await stopAllStreams() }
+        connection.cancel()
     }
 }

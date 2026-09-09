@@ -26,6 +26,7 @@ do {
         sessions[id] = session
     }
 
+    windowManager.startTracking()
     print("VDI Server starting on port \(port)...")
     server.start()
 } catch {
