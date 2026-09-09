@@ -4,15 +4,22 @@ import CoreMedia
 import VDICore
 
 final class ConnectionManager {
+    private struct WindowSession {
+        let decoder: VideoDecoder
+        var view: RemoteWindowView?
+        var forwarder: InputForwarder?
+        var lastFrameNumber: UInt32 = 0
+        var hasReceivedFrame = false
+        var waitingForKeyframe = false
+    }
+
     private let host: String
     private let port: UInt16
     private let client: TCPClient
-    private let decoder = StreamDecoder()
-    private let videoDecoder = VideoDecoder()
-    private var remoteView: RemoteWindowView?
-    private var inputForwarder: InputForwarder?
+    private let streamDecoder = StreamDecoder()
     private var serverName: String?
     private var windowList: [WindowInfo] = []
+    private var windowSessions: [UInt32: WindowSession] = [:]
 
     init(host: String, port: UInt16) {
         self.host = host
@@ -43,19 +50,15 @@ final class ConnectionManager {
         }
 
         client.onData = { [weak self] data in
-            self?.decoder.feed(data)
+            self?.streamDecoder.feed(data)
         }
 
-        decoder.onControlMessage = { [weak self] message in
+        streamDecoder.onControlMessage = { [weak self] message in
             self?.handleControlMessage(message)
         }
 
-        decoder.onVideoFrame = { [weak self] header, data in
+        streamDecoder.onVideoFrame = { [weak self] header, data in
             self?.handleVideoFrame(header: header, data: data)
-        }
-
-        videoDecoder.onDecodedFrame = { [weak self] pixelBuffer, pts in
-            self?.remoteView?.updateFrame(pixelBuffer)
         }
     }
 
@@ -81,28 +84,51 @@ final class ConnectionManager {
         case .streamStarted(let windowID, let width, let height):
             print("Stream started: window \(windowID) (\(width)x\(height))")
             let title = windowList.first(where: { $0.windowID == windowID })?.title ?? "Remote Window"
+            let videoDecoder = VideoDecoder()
+            var session = WindowSession(decoder: videoDecoder)
+
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 let view = RemoteWindowView(width: width, height: height, title: title)
                 view.show()
-                self.remoteView = view
 
-                self.inputForwarder?.stop()
+                videoDecoder.onDecodedFrame = { pixelBuffer, _ in
+                    view.updateFrame(pixelBuffer)
+                }
+
                 let forwarder = InputForwarder(windowID: windowID, windowView: view)
                 forwarder.onInputEvent = { [weak self] event in
                     self?.sendControl(.inputEvent(event))
                 }
                 forwarder.start()
-                self.inputForwarder = forwarder
+
+                session.view = view
+                session.forwarder = forwarder
+                self.windowSessions[windowID] = session
             }
+
+            windowSessions[windowID] = session
 
         case .streamStopped(let windowID):
             print("Stream stopped: window \(windowID)")
+            windowSessions[windowID]?.forwarder?.stop()
+            windowSessions.removeValue(forKey: windowID)
+
+        case .windowCreated(let info):
+            if windowList.firstIndex(where: { $0.windowID == info.windowID }) == nil {
+                windowList.append(info)
+            }
+
+        case .windowDestroyed(let windowID):
+            windowList.removeAll { $0.windowID == windowID }
+            windowSessions[windowID]?.forwarder?.stop()
+            windowSessions.removeValue(forKey: windowID)
 
         case .windowUpdated(let info):
             if let idx = windowList.firstIndex(where: { $0.windowID == info.windowID }) {
                 windowList[idx] = info
             }
+            windowSessions[info.windowID]?.view?.updateTitle(info.title ?? "Remote Window")
 
         case .error(let message):
             print("Server error: \(message)")
@@ -113,16 +139,35 @@ final class ConnectionManager {
     }
 
     private func handleVideoFrame(header: VideoFrameHeader, data: Data) {
-        videoDecoder.decode(frameHeader: header, frameData: data)
+        guard var session = windowSessions[header.windowID] else { return }
+
+        if session.hasReceivedFrame {
+            let expected = session.lastFrameNumber &+ 1
+            if header.frameNumber != expected {
+                print("Frame loss detected: expected \(expected), got \(header.frameNumber)")
+                session.waitingForKeyframe = true
+                windowSessions[header.windowID] = session
+                sendControl(.requestKeyframe(windowID: header.windowID))
+            }
+        }
+
+        if session.waitingForKeyframe && !header.isKeyframe {
+            return
+        }
+        if header.isKeyframe {
+            session.waitingForKeyframe = false
+        }
+
+        session.lastFrameNumber = header.frameNumber
+        session.hasReceivedFrame = true
+        windowSessions[header.windowID] = session
+
+        session.decoder.decode(frameHeader: header, frameData: data)
     }
 
     private func sendControl(_ message: ControlMessage) {
         let data = MessageCodec.encode(control: message)
         client.send(data)
-    }
-
-    func requestKeyframe() {
-        sendControl(.requestKeyframe(windowID: 0))
     }
 
     func selectWindow(at index: Int) {
@@ -131,6 +176,10 @@ final class ConnectionManager {
     }
 
     func disconnect() {
+        for (_, session) in windowSessions {
+            session.forwarder?.stop()
+        }
+        windowSessions.removeAll()
         client.disconnect()
     }
 }
