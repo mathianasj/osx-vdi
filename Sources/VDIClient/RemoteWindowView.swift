@@ -3,23 +3,23 @@ import CoreVideo
 import IOSurface
 
 final class RemoteWindowView {
-    private let window: NSWindow
+    let nsWindow: NSWindow
     private let videoLayer: CALayer
 
     init(width: Int, height: Int, title: String = "VDI Remote Window") {
         let contentRect = NSRect(x: 0, y: 0, width: width, height: height)
-        window = NSWindow(
+        nsWindow = NSWindow(
             contentRect: contentRect,
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
-        window.title = title
-        window.center()
+        nsWindow.title = title
+        nsWindow.center()
 
         let contentView = NSView(frame: contentRect)
         contentView.wantsLayer = true
-        window.contentView = contentView
+        nsWindow.contentView = contentView
 
         videoLayer = CALayer()
         videoLayer.frame = contentView.bounds
@@ -43,20 +43,20 @@ final class RemoteWindowView {
 
     func updateTitle(_ title: String) {
         if Thread.isMainThread {
-            window.title = title
+            nsWindow.title = title
         } else {
             DispatchQueue.main.async { [weak self] in
-                self?.window.title = title
+                self?.nsWindow.title = title
             }
         }
     }
 
     func show() {
         if Thread.isMainThread {
-            window.makeKeyAndOrderFront(nil)
+            nsWindow.makeKeyAndOrderFront(nil)
         } else {
             DispatchQueue.main.async { [weak self] in
-                self?.window.makeKeyAndOrderFront(nil)
+                self?.nsWindow.makeKeyAndOrderFront(nil)
             }
         }
     }

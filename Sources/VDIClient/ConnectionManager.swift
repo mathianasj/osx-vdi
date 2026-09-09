@@ -10,6 +10,7 @@ final class ConnectionManager {
     private let decoder = StreamDecoder()
     private let videoDecoder = VideoDecoder()
     private var remoteView: RemoteWindowView?
+    private var inputForwarder: InputForwarder?
     private var serverName: String?
     private var windowList: [WindowInfo] = []
 
@@ -81,9 +82,18 @@ final class ConnectionManager {
             print("Stream started: window \(windowID) (\(width)x\(height))")
             let title = windowList.first(where: { $0.windowID == windowID })?.title ?? "Remote Window"
             DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
                 let view = RemoteWindowView(width: width, height: height, title: title)
                 view.show()
-                self?.remoteView = view
+                self.remoteView = view
+
+                self.inputForwarder?.stop()
+                let forwarder = InputForwarder(windowID: windowID, windowView: view)
+                forwarder.onInputEvent = { [weak self] event in
+                    self?.sendControl(.inputEvent(event))
+                }
+                forwarder.start()
+                self.inputForwarder = forwarder
             }
 
         case .streamStopped(let windowID):

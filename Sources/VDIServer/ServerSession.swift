@@ -18,10 +18,12 @@ final class ServerSession {
     private let queue = DispatchQueue(label: "com.osx-vdi.server-session")
 
     private var state: State = .waitingForHello
+    private let inputHandler = InputHandler()
     private var captureSession: WindowCaptureSession?
     private var encoder: VideoEncoder?
     private var frameNumber: UInt32 = 0
     private var isSending = false
+    private var activeWindowInfo: WindowInfo?
 
     init(connection: NWConnection, windowManager: WindowManager) {
         self.connection = connection
@@ -65,6 +67,11 @@ final class ServerSession {
 
         case (.connected, .selectWindow(let windowID)):
             Task { await startStreaming(windowID: windowID) }
+
+        case (.streaming, .inputEvent(let inputEvent)):
+            if let windowInfo = activeWindowInfo {
+                inputHandler.handle(inputEvent, windowInfo: windowInfo)
+            }
 
         case (.streaming, .requestKeyframe):
             encoder?.forceKeyframe()
@@ -127,6 +134,18 @@ final class ServerSession {
 
             try await capture.start()
             state = .streaming(windowID: windowID)
+
+            let app = scWindow.owningApplication
+            activeWindowInfo = WindowInfo(
+                windowID: windowID,
+                title: scWindow.title,
+                appName: app?.applicationName,
+                bundleID: app?.bundleIdentifier,
+                bounds: CodableRect(cgRect: scWindow.frame),
+                isOnScreen: true,
+                windowLayer: scWindow.windowLayer
+            )
+
             send(.streamStarted(windowID: windowID, width: width, height: height))
         } catch {
             send(.error("Failed to start streaming: \(error.localizedDescription)"))
