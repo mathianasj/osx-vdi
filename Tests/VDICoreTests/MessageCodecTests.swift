@@ -16,7 +16,15 @@ import Foundation
             isOnScreen: true,
             windowLayer: 0
         )),
-        .inputEvent(InputEvent(type: "keyDown", timestamp: 0)),
+        .deselectWindow(windowID: 1),
+        .windowCreated(WindowInfo(
+            windowID: 2,
+            bounds: CodableRect(x: 0, y: 0, width: 100, height: 100),
+            isOnScreen: true,
+            windowLayer: 0
+        )),
+        .windowDestroyed(windowID: 2),
+        .inputEvent(InputEvent(windowID: 1, type: .keyDown, keyCode: 0)),
         .requestKeyframe(windowID: 1),
         .error("test error"),
     ]

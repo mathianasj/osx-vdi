@@ -102,15 +102,106 @@ import CoreGraphics
 }
 
 @Test func inputEventRoundTrips() throws {
-    let event = InputEvent(type: "keyDown", timestamp: 12345)
+    let event = InputEvent(
+        windowID: 1,
+        type: .keyDown,
+        keyCode: 0x00,
+        modifiers: 0x100,
+        characters: "a"
+    )
     let msg = ControlMessage.inputEvent(event)
     let data = try JSONEncoder().encode(msg)
     let decoded = try JSONDecoder().decode(ControlMessage.self, from: data)
     if case .inputEvent(let e) = decoded {
-        #expect(e.type == "keyDown")
-        #expect(e.timestamp == 12345)
+        #expect(e.windowID == 1)
+        #expect(e.type == .keyDown)
+        #expect(e.keyCode == 0x00)
+        #expect(e.characters == "a")
     } else {
         Issue.record("Expected .inputEvent")
+    }
+}
+
+@Test func mouseInputEventRoundTrips() throws {
+    let event = InputEvent(
+        windowID: 5,
+        type: .mouseDown,
+        x: 0.5,
+        y: 0.75,
+        button: 0,
+        modifiers: 0
+    )
+    let msg = ControlMessage.inputEvent(event)
+    let data = try JSONEncoder().encode(msg)
+    let decoded = try JSONDecoder().decode(ControlMessage.self, from: data)
+    if case .inputEvent(let e) = decoded {
+        #expect(e.windowID == 5)
+        #expect(e.type == .mouseDown)
+        #expect(e.x == 0.5)
+        #expect(e.y == 0.75)
+        #expect(e.button == 0)
+    } else {
+        Issue.record("Expected .inputEvent")
+    }
+}
+
+@Test func scrollInputEventRoundTrips() throws {
+    let event = InputEvent(
+        windowID: 2,
+        type: .scrollWheel,
+        scrollDeltaX: 1.5,
+        scrollDeltaY: -3.0
+    )
+    let msg = ControlMessage.inputEvent(event)
+    let data = try JSONEncoder().encode(msg)
+    let decoded = try JSONDecoder().decode(ControlMessage.self, from: data)
+    if case .inputEvent(let e) = decoded {
+        #expect(e.type == .scrollWheel)
+        #expect(e.scrollDeltaX == 1.5)
+        #expect(e.scrollDeltaY == -3.0)
+    } else {
+        Issue.record("Expected .inputEvent")
+    }
+}
+
+@Test func deselectWindowRoundTrips() throws {
+    let msg = ControlMessage.deselectWindow(windowID: 10)
+    let data = try JSONEncoder().encode(msg)
+    let decoded = try JSONDecoder().decode(ControlMessage.self, from: data)
+    if case .deselectWindow(let id) = decoded {
+        #expect(id == 10)
+    } else {
+        Issue.record("Expected .deselectWindow")
+    }
+}
+
+@Test func windowCreatedRoundTrips() throws {
+    let info = WindowInfo(
+        windowID: 99,
+        title: "New Window",
+        bounds: CodableRect(x: 0, y: 0, width: 400, height: 300),
+        isOnScreen: true,
+        windowLayer: 0
+    )
+    let msg = ControlMessage.windowCreated(info)
+    let data = try JSONEncoder().encode(msg)
+    let decoded = try JSONDecoder().decode(ControlMessage.self, from: data)
+    if case .windowCreated(let w) = decoded {
+        #expect(w.windowID == 99)
+        #expect(w.title == "New Window")
+    } else {
+        Issue.record("Expected .windowCreated")
+    }
+}
+
+@Test func windowDestroyedRoundTrips() throws {
+    let msg = ControlMessage.windowDestroyed(windowID: 42)
+    let data = try JSONEncoder().encode(msg)
+    let decoded = try JSONDecoder().decode(ControlMessage.self, from: data)
+    if case .windowDestroyed(let id) = decoded {
+        #expect(id == 42)
+    } else {
+        Issue.record("Expected .windowDestroyed")
     }
 }
 
