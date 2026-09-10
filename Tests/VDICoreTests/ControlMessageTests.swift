@@ -26,6 +26,23 @@ import CoreGraphics
     }
 }
 
+@Test func serverScreenInfoRoundTrips() throws {
+    let screens = [
+        ScreenInfo(bounds: CodableRect(x: 0, y: 0, width: 1920, height: 1080), scaleFactor: 2.0),
+        ScreenInfo(bounds: CodableRect(x: 1920, y: 0, width: 2560, height: 1440), scaleFactor: 2.0)
+    ]
+    let msg = ControlMessage.serverScreenInfo(screens)
+    let data = try JSONEncoder().encode(msg)
+    let decoded = try JSONDecoder().decode(ControlMessage.self, from: data)
+    if case .serverScreenInfo(let s) = decoded {
+        #expect(s.count == 2)
+        #expect(s[0].bounds.width == 1920)
+        #expect(s[1].scaleFactor == 2.0)
+    } else {
+        Issue.record("Expected .serverScreenInfo")
+    }
+}
+
 @Test func windowListRoundTrips() throws {
     let windows = [
         WindowInfo(

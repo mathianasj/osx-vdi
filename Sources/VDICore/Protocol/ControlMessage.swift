@@ -50,9 +50,20 @@ public struct InputEvent: Codable, Sendable {
     }
 }
 
+public struct ScreenInfo: Codable, Sendable {
+    public var bounds: CodableRect
+    public var scaleFactor: Double
+
+    public init(bounds: CodableRect, scaleFactor: Double) {
+        self.bounds = bounds
+        self.scaleFactor = scaleFactor
+    }
+}
+
 public enum ControlMessage: Codable, Sendable {
     case hello(version: String)
     case helloResponse(version: String, serverName: String)
+    case serverScreenInfo([ScreenInfo])
     case windowList([WindowInfo])
     case selectWindow(windowID: UInt32)
     case deselectWindow(windowID: UInt32)

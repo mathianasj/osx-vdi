@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Network
 import CoreMedia
 import ScreenCaptureKit
@@ -66,6 +67,7 @@ final class ServerSession {
         case .hello where state == .waitingForHello:
             state = .connected
             send(.helloResponse(version: "1.0", serverName: Host.current().localizedName ?? "VDI Server"))
+            sendScreenInfo()
             Task { await sendWindowList() }
 
         case .selectWindow(let windowID) where state == .connected || !streams.isEmpty:
@@ -89,6 +91,16 @@ final class ServerSession {
         default:
             break
         }
+    }
+
+    private func sendScreenInfo() {
+        let screens = NSScreen.screens.map { screen in
+            ScreenInfo(
+                bounds: CodableRect(cgRect: screen.frame),
+                scaleFactor: Double(screen.backingScaleFactor)
+            )
+        }
+        send(.serverScreenInfo(screens))
     }
 
     private func sendWindowList() async {

@@ -21,6 +21,7 @@ final class ConnectionManager {
     private var serverName: String?
     private var windowList: [WindowInfo] = []
     private var windowSessions: [UInt32: WindowSession] = [:]
+    private let layoutManager = WindowLayoutManager()
 
     init(host: String, port: UInt16) {
         self.host = host
@@ -69,6 +70,10 @@ final class ConnectionManager {
             serverName = name
             print("Server: \(name) (v\(version))")
 
+        case .serverScreenInfo(let screens):
+            layoutManager.updateServerScreens(screens)
+            print("Server screens: \(screens.count)")
+
         case .windowList(let windows):
             windowList = windows
             print("\nAvailable windows:")
@@ -94,6 +99,9 @@ final class ConnectionManager {
                 let viewWidth = Int(Double(width) / scaleFactor)
                 let viewHeight = Int(Double(height) / scaleFactor)
                 let view = RemoteWindowView(width: viewWidth, height: viewHeight, title: title)
+                if let info = self.windowList.first(where: { $0.windowID == windowID }) {
+                    self.layoutManager.updateWindowPosition(view, windowInfo: info)
+                }
                 view.show()
 
                 videoDecoder.onDecodedFrame = { pixelBuffer, _ in
@@ -133,6 +141,9 @@ final class ConnectionManager {
                 windowList[idx] = info
             }
             windowSessions[info.windowID]?.view?.updateTitle(info.title ?? "Remote Window")
+            if let view = windowSessions[info.windowID]?.view {
+                layoutManager.updateWindowPosition(view, windowInfo: info)
+            }
 
         case .error(let message):
             print("Server error: \(message)")

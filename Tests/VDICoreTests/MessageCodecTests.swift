@@ -6,6 +6,7 @@ import Foundation
     let messages: [ControlMessage] = [
         .hello(version: "1.0"),
         .helloResponse(version: "1.0", serverName: "Test"),
+        .serverScreenInfo([ScreenInfo(bounds: CodableRect(x: 0, y: 0, width: 1920, height: 1080), scaleFactor: 2.0)]),
         .windowList([]),
         .selectWindow(windowID: 42),
         .streamStarted(windowID: 1, width: 1920, height: 1080),
