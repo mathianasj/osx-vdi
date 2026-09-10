@@ -3,10 +3,19 @@ import VideoToolbox
 import CoreMedia
 
 final class VideoEncoder {
+    enum BitrateLevel: Int, CaseIterable {
+        case poor = 1_000_000
+        case fair = 2_000_000
+        case good = 4_000_000
+        case excellent = 8_000_000
+        case high = 20_000_000
+    }
+
     private var session: VTCompressionSession?
     private var forceNextKeyframe = false
     private let width: Int32
     private let height: Int32
+    private(set) var currentBitrate: Int = 20_000_000
 
     var onEncodedFrame: ((Data, Bool, CMTime, Data?, Data?) -> Void)?
 
@@ -88,6 +97,12 @@ final class VideoEncoder {
 
     func forceKeyframe() {
         forceNextKeyframe = true
+    }
+
+    func setBitrate(_ bitrate: Int) {
+        guard let session = session, bitrate != currentBitrate else { return }
+        currentBitrate = bitrate
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
     }
 
     private func handleEncodedFrame(_ sampleBuffer: CMSampleBuffer) {

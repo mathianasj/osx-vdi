@@ -31,6 +31,8 @@ final class ServerSession {
     private var cursorTimer: DispatchSourceTimer?
     private var lastCursorHash: Int = 0
     private let clipboardMonitor = ClipboardMonitor()
+    private var sendLatencies: [Double] = []
+    private var bitrateTimer: DispatchSourceTimer?
 
     init(connection: NWConnection, windowManager: WindowManager) {
         self.connection = connection
@@ -73,6 +75,7 @@ final class ServerSession {
             sendScreenInfo()
             startCursorTracking()
             startClipboardMonitoring()
+            startBitrateAdaptation()
             Task { await sendWindowList() }
 
         case .selectWindow(let windowID) where state == .connected || !streams.isEmpty:
@@ -262,10 +265,68 @@ final class ServerSession {
         streams[windowID] = stream
 
         let data = MessageCodec.encode(videoHeader: header, sps: sps, pps: pps, payload: nalData)
+        let sendStart = CFAbsoluteTimeGetCurrent()
 
         connection.send(content: data, completion: .contentProcessed { [weak self] _ in
             self?.streams[windowID]?.isSending = false
+            let latency = CFAbsoluteTimeGetCurrent() - sendStart
+            self?.recordSendLatency(latency)
         })
+    }
+
+    private func recordSendLatency(_ latency: Double) {
+        sendLatencies.append(latency)
+        if sendLatencies.count > 30 {
+            sendLatencies.removeFirst()
+        }
+    }
+
+    private func startBitrateAdaptation() {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 2, repeating: .seconds(2))
+        timer.setEventHandler { [weak self] in
+            self?.adaptBitrate()
+        }
+        timer.resume()
+        bitrateTimer = timer
+    }
+
+    private func stopBitrateAdaptation() {
+        bitrateTimer?.cancel()
+        bitrateTimer = nil
+    }
+
+    private func adaptBitrate() {
+        guard !sendLatencies.isEmpty else { return }
+
+        let avgLatency = sendLatencies.reduce(0, +) / Double(sendLatencies.count)
+        let levels = VideoEncoder.BitrateLevel.allCases
+
+        let targetLevel: VideoEncoder.BitrateLevel
+        if avgLatency < 0.005 {
+            targetLevel = .high
+        } else if avgLatency < 0.015 {
+            targetLevel = .excellent
+        } else if avgLatency < 0.030 {
+            targetLevel = .good
+        } else if avgLatency < 0.060 {
+            targetLevel = .fair
+        } else {
+            targetLevel = .poor
+        }
+
+        for (_, stream) in streams {
+            let current = stream.encoder.currentBitrate
+            let target = targetLevel.rawValue
+
+            if target < current {
+                stream.encoder.setBitrate(target)
+            } else if target > current {
+                let currentIdx = levels.firstIndex { $0.rawValue == current } ?? 0
+                let nextIdx = min(currentIdx + 1, levels.count - 1)
+                stream.encoder.setBitrate(levels[nextIdx].rawValue)
+            }
+        }
     }
 
     private func send(_ message: ControlMessage) {
@@ -277,6 +338,7 @@ final class ServerSession {
         guard state != .disconnected else { return }
         state = .disconnected
         stopCursorTracking()
+        stopBitrateAdaptation()
         clipboardMonitor.stop()
         Task { await stopAllStreams() }
         connection.cancel()
