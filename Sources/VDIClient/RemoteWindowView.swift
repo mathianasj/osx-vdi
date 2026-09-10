@@ -4,16 +4,38 @@ import IOSurface
 
 final class VideoContentView: NSView {
     override var acceptsFirstResponder: Bool { true }
+    private var dragOrigin: NSPoint?
 
     override func keyDown(with event: NSEvent) {}
     override func keyUp(with event: NSEvent) {}
     override func flagsChanged(with event: NSEvent) {}
-    override func mouseDown(with event: NSEvent) {}
-    override func mouseUp(with event: NSEvent) {}
+
+    override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.option) {
+            dragOrigin = event.locationInWindow
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragOrigin = nil
+    }
+
     override func rightMouseDown(with event: NSEvent) {}
     override func rightMouseUp(with event: NSEvent) {}
+
     override func mouseMoved(with event: NSEvent) {}
-    override func mouseDragged(with event: NSEvent) {}
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let origin = dragOrigin, let window = self.window else { return }
+        let current = event.locationInWindow
+        let dx = current.x - origin.x
+        let dy = current.y - origin.y
+        var frame = window.frame
+        frame.origin.x += dx
+        frame.origin.y += dy
+        window.setFrameOrigin(frame.origin)
+    }
+
     override func scrollWheel(with event: NSEvent) {}
 }
 
@@ -25,20 +47,21 @@ final class RemoteWindowView {
         let contentRect = NSRect(x: 0, y: 0, width: width, height: height)
         nsWindow = NSWindow(
             contentRect: contentRect,
-            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            styleMask: .borderless,
             backing: .buffered,
             defer: false
         )
-        nsWindow.title = title
-        nsWindow.center()
+        nsWindow.isOpaque = false
+        nsWindow.backgroundColor = .clear
+        nsWindow.level = .normal
+        nsWindow.hasShadow = true
         nsWindow.isReleasedWhenClosed = false
         nsWindow.acceptsMouseMovedEvents = true
-        nsWindow.contentAspectRatio = NSSize(width: width, height: height)
-        nsWindow.backgroundColor = .black
+        nsWindow.isMovableByWindowBackground = false
+        nsWindow.center()
 
         let contentView = VideoContentView(frame: contentRect)
         contentView.wantsLayer = true
-        contentView.layer?.backgroundColor = NSColor.black.cgColor
         nsWindow.contentView = contentView
 
         videoLayer = CALayer()

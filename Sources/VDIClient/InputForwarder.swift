@@ -41,6 +41,11 @@ final class InputForwarder {
     private func handleEvent(_ nsEvent: NSEvent) {
         guard let window = nsEvent.window, window === windowView.nsWindow else { return }
 
+        if nsEvent.modifierFlags.contains(.option) &&
+           (nsEvent.type == .leftMouseDown || nsEvent.type == .leftMouseDragged || nsEvent.type == .leftMouseUp) {
+            return
+        }
+
         let inputEvent: InputEvent
 
         switch nsEvent.type {
