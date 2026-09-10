@@ -74,5 +74,6 @@ public enum ControlMessage: Codable, Sendable {
     case windowUpdated(WindowInfo)
     case inputEvent(InputEvent)
     case requestKeyframe(windowID: UInt32)
+    case cursorUpdate(windowID: UInt32, imageData: Data, hotspotX: Int, hotspotY: Int)
     case error(String)
 }

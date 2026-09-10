@@ -28,6 +28,8 @@ final class ServerSession {
 
     private var state: State = .waitingForHello
     private var streams: [UInt32: WindowStream] = [:]
+    private var cursorTimer: DispatchSourceTimer?
+    private var lastCursorHash: Int = 0
 
     init(connection: NWConnection, windowManager: WindowManager) {
         self.connection = connection
@@ -68,6 +70,7 @@ final class ServerSession {
             state = .connected
             send(.helloResponse(version: "1.0", serverName: Host.current().localizedName ?? "VDI Server"))
             sendScreenInfo()
+            startCursorTracking()
             Task { await sendWindowList() }
 
         case .selectWindow(let windowID) where state == .connected || !streams.isEmpty:
@@ -101,6 +104,52 @@ final class ServerSession {
             )
         }
         send(.serverScreenInfo(screens))
+    }
+
+    private func startCursorTracking() {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(100))
+        timer.setEventHandler { [weak self] in
+            self?.checkCursorChange()
+        }
+        timer.resume()
+        cursorTimer = timer
+    }
+
+    private func stopCursorTracking() {
+        cursorTimer?.cancel()
+        cursorTimer = nil
+    }
+
+    private func checkCursorChange() {
+        guard !streams.isEmpty else { return }
+
+        let mouseLocation = NSEvent.mouseLocation
+        let cursorWindowID = windowIDAtPoint(mouseLocation)
+        guard let windowID = cursorWindowID, streams[windowID] != nil else { return }
+
+        let cursor = NSCursor.current
+        let cursorImage = cursor.image
+        let hash = cursorImage.tiffRepresentation?.hashValue ?? 0
+        guard hash != lastCursorHash else { return }
+        lastCursorHash = hash
+
+        guard let tiff = cursorImage.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let pngData = bitmap.representation(using: .png, properties: [:]) else { return }
+
+        let hotspot = cursor.hotSpot
+        send(.cursorUpdate(windowID: windowID, imageData: pngData, hotspotX: Int(hotspot.x), hotspotY: Int(hotspot.y)))
+    }
+
+    private func windowIDAtPoint(_ screenPoint: NSPoint) -> UInt32? {
+        let cgPoint = CGPoint(x: screenPoint.x, y: NSScreen.main.map { $0.frame.height - screenPoint.y } ?? screenPoint.y)
+        for (id, stream) in streams {
+            if stream.info.bounds.cgRect.contains(cgPoint) {
+                return id
+            }
+        }
+        return nil
     }
 
     private func sendWindowList() async {
@@ -215,6 +264,7 @@ final class ServerSession {
     func disconnect() {
         guard state != .disconnected else { return }
         state = .disconnected
+        stopCursorTracking()
         Task { await stopAllStreams() }
         connection.cancel()
     }

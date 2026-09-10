@@ -5,6 +5,13 @@ import IOSurface
 final class VideoContentView: NSView {
     override var acceptsFirstResponder: Bool { true }
     private var dragOrigin: NSPoint?
+    var remoteCursor: NSCursor?
+
+    override func resetCursorRects() {
+        if let cursor = remoteCursor {
+            addCursorRect(bounds, cursor: cursor)
+        }
+    }
 
     override func keyDown(with event: NSEvent) {}
     override func keyUp(with event: NSEvent) {}
@@ -92,6 +99,20 @@ final class RemoteWindowView {
                 self?.nsWindow.title = title
             }
         }
+    }
+
+    func updateCursor(imageData: Data, hotspotX: Int, hotspotY: Int) {
+        guard let image = NSImage(data: imageData) else { return }
+        let cursor = NSCursor(image: image, hotSpot: NSPoint(x: hotspotX, y: hotspotY))
+
+        let apply = {
+            guard let contentView = self.nsWindow.contentView as? VideoContentView else { return }
+            contentView.remoteCursor = cursor
+            contentView.window?.invalidateCursorRects(for: contentView)
+        }
+
+        if Thread.isMainThread { apply() }
+        else { DispatchQueue.main.async { [weak self] in guard self != nil else { return }; apply() } }
     }
 
     func show() {

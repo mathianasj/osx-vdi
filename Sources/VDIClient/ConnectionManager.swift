@@ -145,6 +145,9 @@ final class ConnectionManager {
                 layoutManager.updateWindowPosition(view, windowInfo: info)
             }
 
+        case .cursorUpdate(let windowID, let imageData, let hotspotX, let hotspotY):
+            windowSessions[windowID]?.view?.updateCursor(imageData: imageData, hotspotX: hotspotX, hotspotY: hotspotY)
+
         case .error(let message):
             print("Server error: \(message)")
 

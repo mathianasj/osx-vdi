@@ -27,6 +27,7 @@ import Foundation
         .windowDestroyed(windowID: 2),
         .inputEvent(InputEvent(windowID: 1, type: .keyDown, keyCode: 0)),
         .requestKeyframe(windowID: 1),
+        .cursorUpdate(windowID: 1, imageData: Data([0x89, 0x50, 0x4E, 0x47]), hotspotX: 0, hotspotY: 0),
         .error("test error"),
     ]
 
