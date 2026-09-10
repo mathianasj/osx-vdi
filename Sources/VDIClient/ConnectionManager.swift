@@ -100,7 +100,8 @@ final class ConnectionManager {
                 let scaleFactor = NSScreen.main?.backingScaleFactor ?? 2.0
                 let viewWidth = Int(Double(width) / scaleFactor)
                 let viewHeight = Int(Double(height) / scaleFactor)
-                let view = RemoteWindowView(width: viewWidth, height: viewHeight, title: title)
+                let bundleID = self.windowList.first(where: { $0.windowID == windowID })?.bundleID
+                let view = RemoteWindowView(width: viewWidth, height: viewHeight, title: title, bundleID: bundleID)
                 if let info = self.windowList.first(where: { $0.windowID == windowID }) {
                     self.layoutManager.updateWindowPosition(view, windowInfo: info)
                 }

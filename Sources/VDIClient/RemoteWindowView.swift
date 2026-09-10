@@ -50,7 +50,7 @@ final class RemoteWindowView {
     let nsWindow: NSWindow
     private let videoLayer: CALayer
 
-    init(width: Int, height: Int, title: String = "VDI Remote Window") {
+    init(width: Int, height: Int, title: String = "VDI Remote Window", bundleID: String? = nil) {
         let contentRect = NSRect(x: 0, y: 0, width: width, height: height)
         nsWindow = NSWindow(
             contentRect: contentRect,
@@ -65,6 +65,10 @@ final class RemoteWindowView {
         nsWindow.isReleasedWhenClosed = false
         nsWindow.acceptsMouseMovedEvents = true
         nsWindow.isMovableByWindowBackground = false
+        nsWindow.collectionBehavior = [.managed, .participatesInCycle, .fullScreenPrimary]
+        if let bundleID = bundleID {
+            nsWindow.tabbingIdentifier = "vdi-remote-\(bundleID)"
+        }
         nsWindow.center()
 
         let contentView = VideoContentView(frame: contentRect)
