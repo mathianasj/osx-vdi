@@ -11,6 +11,8 @@ final class WindowCaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
 
     var onFrame: ((CMSampleBuffer) -> Void)?
     var onError: ((Error) -> Void)?
+    private var idleFrameCount: Int = 0
+    private static let idleThreshold = 120 // ~2 seconds at 60fps
 
     init(window: SCWindow, width: Int, height: Int) {
         self.window = window
@@ -52,6 +54,15 @@ final class WindowCaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
               let status = SCFrameStatus(rawValue: statusValue),
               status == .complete else {
             return
+        }
+
+        if let dirtyRects = attachments.first?[.dirtyRects] as? [CGRect], dirtyRects.isEmpty {
+            idleFrameCount += 1
+            if idleFrameCount > Self.idleThreshold {
+                return
+            }
+        } else {
+            idleFrameCount = 0
         }
 
         onFrame?(sampleBuffer)
