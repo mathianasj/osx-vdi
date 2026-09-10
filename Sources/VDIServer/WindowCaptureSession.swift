@@ -26,7 +26,7 @@ final class WindowCaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         config.queueDepth = 3
-        config.showsCursor = true
+        config.showsCursor = false
         config.scalesToFit = true
         config.ignoreShadowsSingleWindow = true
         config.width = width

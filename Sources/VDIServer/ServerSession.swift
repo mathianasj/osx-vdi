@@ -79,6 +79,8 @@ final class ServerSession {
         case .inputEvent(let inputEvent):
             if let stream = streams[inputEvent.windowID] {
                 inputHandler.handle(inputEvent, windowInfo: stream.info)
+            } else {
+                print("[ServerSession] No stream for windowID \(inputEvent.windowID), available: \(Array(streams.keys))")
             }
 
         case .requestKeyframe(let windowID):
@@ -105,8 +107,9 @@ final class ServerSession {
                 return
             }
 
-            let width = Int(scWindow.frame.width)
-            let height = Int(scWindow.frame.height)
+            let scaleFactor = Int(NSScreen.main?.backingScaleFactor ?? 2.0)
+            let width = Int(scWindow.frame.width) * scaleFactor
+            let height = Int(scWindow.frame.height) * scaleFactor
 
             let encoder = try VideoEncoder(width: width, height: height)
 

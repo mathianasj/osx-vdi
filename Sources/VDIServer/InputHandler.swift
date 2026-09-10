@@ -48,12 +48,19 @@ final class InputHandler {
             return
         }
 
-        guard let cgEvent = CGEvent(mouseEventSource: nil, mouseType: mouseType, mouseCursorPosition: point, mouseButton: mouseButton) else { return }
+        guard let cgEvent = CGEvent(mouseEventSource: nil, mouseType: mouseType, mouseCursorPosition: point, mouseButton: mouseButton) else {
+            print("[InputHandler] Failed to create CGEvent for \(event.type)")
+            return
+        }
         cgEvent.flags = CGEventFlags(rawValue: event.modifiers)
 
-        if let pid = pidForWindow(windowInfo) {
-            cgEvent.postToPid(pid)
+        if event.type == .mouseDown || event.type == .mouseUp ||
+           event.type == .rightMouseDown || event.type == .rightMouseUp {
+            cgEvent.setIntegerValueField(.mouseEventClickState, value: 1)
         }
+
+        CGWarpMouseCursorPosition(point)
+        cgEvent.post(tap: .cghidEventTap)
     }
 
     private func handleScrollEvent(_ event: InputEvent, windowInfo: WindowInfo) {
@@ -62,6 +69,8 @@ final class InputHandler {
 
         if let pid = pidForWindow(windowInfo) {
             cgEvent.postToPid(pid)
+        } else {
+            cgEvent.post(tap: .cghidEventTap)
         }
     }
 
@@ -72,6 +81,8 @@ final class InputHandler {
 
         if let pid = pidForWindow(windowInfo) {
             cgEvent.postToPid(pid)
+        } else {
+            cgEvent.post(tap: .cghidEventTap)
         }
     }
 
@@ -82,12 +93,26 @@ final class InputHandler {
 
         if let pid = pidForWindow(windowInfo) {
             cgEvent.postToPid(pid)
+        } else {
+            cgEvent.post(tap: .cghidEventTap)
         }
     }
 
     private func pidForWindow(_ windowInfo: WindowInfo) -> pid_t? {
-        guard let bundleID = windowInfo.bundleID else { return nil }
-        let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-        return apps.first?.processIdentifier
+        if let bundleID = windowInfo.bundleID {
+            let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            if let pid = apps.first?.processIdentifier {
+                return pid
+            }
+        }
+
+        guard let windowList = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[CFString: Any]] else { return nil }
+        for entry in windowList {
+            if let wid = entry[kCGWindowNumber] as? UInt32, wid == windowInfo.windowID,
+               let pid = entry[kCGWindowOwnerPID] as? pid_t {
+                return pid
+            }
+        }
+        return nil
     }
 }

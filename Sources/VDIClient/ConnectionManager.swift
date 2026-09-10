@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Network
 import CoreMedia
 import VDICore
@@ -76,9 +77,9 @@ final class ConnectionManager {
                 let app = w.appName ?? "Unknown"
                 print("  [\(i + 1)] \(app) — \(title) (\(Int(w.bounds.width))x\(Int(w.bounds.height)))")
             }
-            if let first = windows.first {
-                print("\nAuto-selecting window 1: \(first.title ?? "Untitled")")
-                sendControl(.selectWindow(windowID: first.windowID))
+            print("\nEnter window number to stream (or 'q' to quit):")
+            DispatchQueue.global().async { [weak self] in
+                self?.readWindowSelection()
             }
 
         case .streamStarted(let windowID, let width, let height):
@@ -89,7 +90,10 @@ final class ConnectionManager {
 
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
-                let view = RemoteWindowView(width: width, height: height, title: title)
+                let scaleFactor = NSScreen.main?.backingScaleFactor ?? 2.0
+                let viewWidth = Int(Double(width) / scaleFactor)
+                let viewHeight = Int(Double(height) / scaleFactor)
+                let view = RemoteWindowView(width: viewWidth, height: viewHeight, title: title)
                 view.show()
 
                 videoDecoder.onDecodedFrame = { pixelBuffer, _ in
@@ -168,6 +172,24 @@ final class ConnectionManager {
     private func sendControl(_ message: ControlMessage) {
         let data = MessageCodec.encode(control: message)
         client.send(data)
+    }
+
+    private func readWindowSelection() {
+        while let line = readLine() {
+            let input = line.trimmingCharacters(in: .whitespaces)
+            if input.lowercased() == "q" {
+                disconnect()
+                exit(0)
+            }
+            if let num = Int(input), num >= 1, num <= windowList.count {
+                let window = windowList[num - 1]
+                print("Selecting: \(window.title ?? "Untitled")")
+                sendControl(.selectWindow(windowID: window.windowID))
+                print("\nEnter another window number, or 'q' to quit:")
+            } else {
+                print("Invalid selection. Enter 1-\(windowList.count) or 'q':")
+            }
+        }
     }
 
     func selectWindow(at index: Int) {

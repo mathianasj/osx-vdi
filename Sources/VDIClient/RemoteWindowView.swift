@@ -2,6 +2,21 @@ import AppKit
 import CoreVideo
 import IOSurface
 
+final class VideoContentView: NSView {
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {}
+    override func keyUp(with event: NSEvent) {}
+    override func flagsChanged(with event: NSEvent) {}
+    override func mouseDown(with event: NSEvent) {}
+    override func mouseUp(with event: NSEvent) {}
+    override func rightMouseDown(with event: NSEvent) {}
+    override func rightMouseUp(with event: NSEvent) {}
+    override func mouseMoved(with event: NSEvent) {}
+    override func mouseDragged(with event: NSEvent) {}
+    override func scrollWheel(with event: NSEvent) {}
+}
+
 final class RemoteWindowView {
     let nsWindow: NSWindow
     private let videoLayer: CALayer
@@ -16,9 +31,14 @@ final class RemoteWindowView {
         )
         nsWindow.title = title
         nsWindow.center()
+        nsWindow.isReleasedWhenClosed = false
+        nsWindow.acceptsMouseMovedEvents = true
+        nsWindow.contentAspectRatio = NSSize(width: width, height: height)
+        nsWindow.backgroundColor = .black
 
-        let contentView = NSView(frame: contentRect)
+        let contentView = VideoContentView(frame: contentRect)
         contentView.wantsLayer = true
+        contentView.layer?.backgroundColor = NSColor.black.cgColor
         nsWindow.contentView = contentView
 
         videoLayer = CALayer()
@@ -54,9 +74,11 @@ final class RemoteWindowView {
     func show() {
         if Thread.isMainThread {
             nsWindow.makeKeyAndOrderFront(nil)
+            nsWindow.makeFirstResponder(nsWindow.contentView)
         } else {
             DispatchQueue.main.async { [weak self] in
                 self?.nsWindow.makeKeyAndOrderFront(nil)
+                self?.nsWindow.makeFirstResponder(self?.nsWindow.contentView)
             }
         }
     }

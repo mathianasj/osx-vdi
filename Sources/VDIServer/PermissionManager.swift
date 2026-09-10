@@ -21,28 +21,33 @@ final class PermissionManager {
     }
 
     static func ensurePermissions() {
-        if checkScreenCapturePermission() {
-            return
-        }
+        if !checkScreenCapturePermission() {
+            print("Screen recording permission is required.")
+            print("Go to: System Settings > Privacy & Security > Screen Recording")
+            print("Enable permission for this application, then restart.")
+            print("")
+            print("Requesting permission now...")
 
-        print("Screen recording permission is required.")
-        print("Go to: System Settings > Privacy & Security > Screen Recording")
-        print("Enable permission for this application, then restart.")
-        print("")
-        print("Requesting permission now...")
+            let granted = requestScreenCapturePermission()
 
-        let granted = requestScreenCapturePermission()
-
-        if !granted {
-            print("Screen recording permission was denied. Exiting.")
-            exit(1)
+            if !granted {
+                print("Screen recording permission was denied. Exiting.")
+                exit(1)
+            }
         }
 
         if !checkAccessibilityPermission() {
             print("")
-            print("Accessibility permission is recommended for input forwarding.")
+            print("Accessibility permission is REQUIRED for input forwarding.")
             print("Go to: System Settings > Privacy & Security > Accessibility")
+            print("Enable permission for this application, then restart.")
             _ = requestAccessibilityPermission()
+            print("")
+            print("Waiting for accessibility permission...")
+            while !checkAccessibilityPermission() {
+                Thread.sleep(forTimeInterval: 1.0)
+            }
+            print("Accessibility permission granted!")
         }
     }
 }
