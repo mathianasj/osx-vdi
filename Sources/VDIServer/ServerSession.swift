@@ -30,6 +30,7 @@ final class ServerSession {
     private var streams: [UInt32: WindowStream] = [:]
     private var cursorTimer: DispatchSourceTimer?
     private var lastCursorHash: Int = 0
+    private let clipboardMonitor = ClipboardMonitor()
 
     init(connection: NWConnection, windowManager: WindowManager) {
         self.connection = connection
@@ -71,6 +72,7 @@ final class ServerSession {
             send(.helloResponse(version: "1.0", serverName: Host.current().localizedName ?? "VDI Server"))
             sendScreenInfo()
             startCursorTracking()
+            startClipboardMonitoring()
             Task { await sendWindowList() }
 
         case .selectWindow(let windowID) where state == .connected || !streams.isEmpty:
@@ -90,6 +92,9 @@ final class ServerSession {
 
         case .requestKeyframe(let windowID):
             streams[windowID]?.encoder.forceKeyframe()
+
+        case .clipboardUpdate(let type, let data):
+            clipboardMonitor.applyRemoteClipboard(type: type, data: data)
 
         default:
             break
@@ -150,6 +155,13 @@ final class ServerSession {
             }
         }
         return nil
+    }
+
+    private func startClipboardMonitoring() {
+        clipboardMonitor.onClipboardChange = { [weak self] type, data in
+            self?.send(.clipboardUpdate(type: type, data: data))
+        }
+        clipboardMonitor.start()
     }
 
     private func sendWindowList() async {
@@ -265,6 +277,7 @@ final class ServerSession {
         guard state != .disconnected else { return }
         state = .disconnected
         stopCursorTracking()
+        clipboardMonitor.stop()
         Task { await stopAllStreams() }
         connection.cancel()
     }

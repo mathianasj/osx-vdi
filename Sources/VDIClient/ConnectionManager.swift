@@ -22,6 +22,7 @@ final class ConnectionManager {
     private var windowList: [WindowInfo] = []
     private var windowSessions: [UInt32: WindowSession] = [:]
     private let layoutManager = WindowLayoutManager()
+    private let clipboardMonitor = ClipboardMonitor()
 
     init(host: String, port: UInt16) {
         self.host = host
@@ -42,6 +43,7 @@ final class ConnectionManager {
             case .ready:
                 print("Connected to server")
                 self?.sendControl(.hello(version: "1.0"))
+                self?.startClipboardMonitoring()
             case .failed(let error):
                 print("Connection failed: \(error)")
             case .cancelled:
@@ -148,6 +150,9 @@ final class ConnectionManager {
         case .cursorUpdate(let windowID, let imageData, let hotspotX, let hotspotY):
             windowSessions[windowID]?.view?.updateCursor(imageData: imageData, hotspotX: hotspotX, hotspotY: hotspotY)
 
+        case .clipboardUpdate(let type, let data):
+            clipboardMonitor.applyRemoteClipboard(type: type, data: data)
+
         case .error(let message):
             print("Server error: \(message)")
 
@@ -206,12 +211,20 @@ final class ConnectionManager {
         }
     }
 
+    private func startClipboardMonitoring() {
+        clipboardMonitor.onClipboardChange = { [weak self] type, data in
+            self?.sendControl(.clipboardUpdate(type: type, data: data))
+        }
+        clipboardMonitor.start()
+    }
+
     func selectWindow(at index: Int) {
         guard index >= 0, index < windowList.count else { return }
         sendControl(.selectWindow(windowID: windowList[index].windowID))
     }
 
     func disconnect() {
+        clipboardMonitor.stop()
         for (_, session) in windowSessions {
             session.forwarder?.stop()
         }
