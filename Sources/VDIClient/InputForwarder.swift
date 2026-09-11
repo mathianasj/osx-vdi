@@ -41,9 +41,12 @@ final class InputForwarder {
     private func handleEvent(_ nsEvent: NSEvent) {
         guard let window = nsEvent.window, window === windowView.nsWindow else { return }
 
-        if nsEvent.modifierFlags.contains(.option) &&
-           (nsEvent.type == .leftMouseDown || nsEvent.type == .leftMouseDragged || nsEvent.type == .leftMouseUp) {
-            return
+        if nsEvent.type == .leftMouseDown || nsEvent.type == .leftMouseUp ||
+           nsEvent.type == .leftMouseDragged || nsEvent.type == .rightMouseDown ||
+           nsEvent.type == .rightMouseUp || nsEvent.type == .mouseMoved {
+            guard let contentView = window.contentView else { return }
+            let loc = contentView.convert(nsEvent.locationInWindow, from: nil)
+            guard contentView.bounds.contains(loc) else { return }
         }
 
         let inputEvent: InputEvent
@@ -62,11 +65,16 @@ final class InputForwarder {
             )
 
         case .scrollWheel:
+            let (nx, ny) = normalizedPosition(nsEvent)
+            let deltaX = nsEvent.hasPreciseScrollingDeltas ? nsEvent.scrollingDeltaX : nsEvent.scrollingDeltaX * 10.0
+            let deltaY = nsEvent.hasPreciseScrollingDeltas ? nsEvent.scrollingDeltaY : nsEvent.scrollingDeltaY * 10.0
             inputEvent = InputEvent(
                 windowID: windowID,
                 type: .scrollWheel,
-                scrollDeltaX: nsEvent.scrollingDeltaX,
-                scrollDeltaY: nsEvent.scrollingDeltaY
+                x: nx,
+                y: ny,
+                scrollDeltaX: deltaX,
+                scrollDeltaY: deltaY
             )
 
         case .keyDown, .keyUp:

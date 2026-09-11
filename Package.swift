@@ -15,9 +15,13 @@ let package = Package(
         .target(
             name: "VDICore"
         ),
+        .target(
+            name: "CGVirtualDisplayBridge",
+            publicHeadersPath: "include"
+        ),
         .executableTarget(
             name: "VDIServer",
-            dependencies: ["VDICore"]
+            dependencies: ["VDICore", "CGVirtualDisplayBridge"]
         ),
         .executableTarget(
             name: "VDIClient",

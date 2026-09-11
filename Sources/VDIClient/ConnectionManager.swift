@@ -71,6 +71,7 @@ final class ConnectionManager {
         case .helloResponse(let version, let name):
             serverName = name
             print("Server: \(name) (v\(version))")
+            sendClientDisplayInfo()
 
         case .serverScreenInfo(let screens):
             layoutManager.updateServerScreens(screens)
@@ -91,17 +92,19 @@ final class ConnectionManager {
 
         case .streamStarted(let windowID, let width, let height):
             print("Stream started: window \(windowID) (\(width)x\(height))")
+
+            if windowSessions[windowID]?.view != nil {
+                return
+            }
+
             let title = windowList.first(where: { $0.windowID == windowID })?.title ?? "Remote Window"
             let videoDecoder = VideoDecoder()
             var session = WindowSession(decoder: videoDecoder)
 
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
-                let scaleFactor = NSScreen.main?.backingScaleFactor ?? 2.0
-                let viewWidth = Int(Double(width) / scaleFactor)
-                let viewHeight = Int(Double(height) / scaleFactor)
                 let bundleID = self.windowList.first(where: { $0.windowID == windowID })?.bundleID
-                let view = RemoteWindowView(width: viewWidth, height: viewHeight, title: title, bundleID: bundleID)
+                let view = RemoteWindowView(width: width, height: height, title: title, bundleID: bundleID)
                 if let info = self.windowList.first(where: { $0.windowID == windowID }) {
                     self.layoutManager.updateWindowPosition(view, windowInfo: info)
                 }
@@ -109,6 +112,14 @@ final class ConnectionManager {
 
                 videoDecoder.onDecodedFrame = { pixelBuffer, _ in
                     view.updateFrame(pixelBuffer)
+                }
+
+                view.onResize = { [weak self] width, height in
+                    self?.sendControl(.resizeWindow(windowID: windowID, width: width, height: height))
+                }
+
+                view.onDisplayChanged = { [weak self] displayIndex in
+                    self?.sendControl(.moveToDisplay(windowID: windowID, displayIndex: displayIndex))
                 }
 
                 let forwarder = InputForwarder(windowID: windowID, windowView: view)
@@ -144,12 +155,9 @@ final class ConnectionManager {
                 windowList[idx] = info
             }
             windowSessions[info.windowID]?.view?.updateTitle(info.title ?? "Remote Window")
-            if let view = windowSessions[info.windowID]?.view {
-                layoutManager.updateWindowPosition(view, windowInfo: info)
-            }
 
-        case .cursorUpdate(let windowID, let imageData, let hotspotX, let hotspotY):
-            windowSessions[windowID]?.view?.updateCursor(imageData: imageData, hotspotX: hotspotX, hotspotY: hotspotY)
+        case .cursorUpdate(let windowID, let imageData, let hotspotX, let hotspotY, let pointWidth, let pointHeight):
+            windowSessions[windowID]?.view?.updateCursor(imageData: imageData, hotspotX: hotspotX, hotspotY: hotspotY, pointWidth: pointWidth, pointHeight: pointHeight)
 
         case .clipboardUpdate(let type, let data):
             clipboardMonitor.applyRemoteClipboard(type: type, data: data)
@@ -209,6 +217,22 @@ final class ConnectionManager {
             } else {
                 print("Invalid selection. Enter 1-\(windowList.count) or 'q':")
             }
+        }
+    }
+
+    private func sendClientDisplayInfo() {
+        DispatchQueue.main.async { [weak self] in
+            let screens = NSScreen.screens.map { screen in
+                ScreenInfo(
+                    bounds: CodableRect(cgRect: screen.frame),
+                    scaleFactor: Double(screen.backingScaleFactor)
+                )
+            }
+            print("Sending client display info: \(screens.count) display(s)")
+            for (i, s) in screens.enumerated() {
+                print("  Display \(i): \(Int(s.bounds.width))x\(Int(s.bounds.height)) @ \(s.scaleFactor)x")
+            }
+            self?.sendControl(.clientDisplayInfo(screens))
         }
     }
 

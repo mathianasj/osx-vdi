@@ -33,6 +33,7 @@ final class ServerSession {
     private let clipboardMonitor = ClipboardMonitor()
     private var sendLatencies: [Double] = []
     private var bitrateTimer: DispatchSourceTimer?
+    private let virtualDisplayManager = VirtualDisplayManager()
 
     init(connection: NWConnection, windowManager: WindowManager) {
         self.connection = connection
@@ -86,6 +87,20 @@ final class ServerSession {
         case .deselectWindow(let windowID):
             Task { await stopStreaming(windowID: windowID) }
 
+        case .resizeWindow(let windowID, let width, let height):
+            print("[ServerSession] Resize request: window \(windowID) to \(width)x\(height)")
+            Task { await restartStreaming(windowID: windowID, width: width, height: height) }
+
+        case .moveToDisplay(let windowID, let displayIndex):
+            print("[ServerSession] Move window \(windowID) to display \(displayIndex)")
+            if let stream = streams[windowID], let pid = findPid(for: stream.info) {
+                virtualDisplayManager.moveWindowToDisplay(pid: pid, windowBounds: stream.info.bounds.cgRect, displayIndex: displayIndex)
+                Task {
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    await self.recaptureStream(windowID: windowID)
+                }
+            }
+
         case .inputEvent(let inputEvent):
             if let stream = streams[inputEvent.windowID] {
                 inputHandler.handle(inputEvent, windowInfo: stream.info)
@@ -95,6 +110,15 @@ final class ServerSession {
 
         case .requestKeyframe(let windowID):
             streams[windowID]?.encoder.forceKeyframe()
+
+        case .clientDisplayInfo(let screens):
+            print("[ServerSession] Client has \(screens.count) display(s)")
+            if virtualDisplayManager.configureForClient(screens: screens) {
+                Task {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    await self.sendWindowList()
+                }
+            }
 
         case .clipboardUpdate(let type, let data):
             clipboardMonitor.applyRemoteClipboard(type: type, data: data)
@@ -147,7 +171,8 @@ final class ServerSession {
               let pngData = bitmap.representation(using: .png, properties: [:]) else { return }
 
         let hotspot = cursor.hotSpot
-        send(.cursorUpdate(windowID: windowID, imageData: pngData, hotspotX: Int(hotspot.x), hotspotY: Int(hotspot.y)))
+        let imgSize = cursorImage.size
+        send(.cursorUpdate(windowID: windowID, imageData: pngData, hotspotX: Int(hotspot.x), hotspotY: Int(hotspot.y), pointWidth: imgSize.width, pointHeight: imgSize.height))
     }
 
     private func windowIDAtPoint(_ screenPoint: NSPoint) -> UInt32? {
@@ -183,9 +208,22 @@ final class ServerSession {
                 return
             }
 
+            if virtualDisplayManager.isActive {
+                if let pid = pidForApp(scWindow.owningApplication) {
+                    virtualDisplayManager.moveWindowToDisplay(
+                        pid: pid,
+                        windowBounds: scWindow.frame,
+                        displayIndex: 0
+                    )
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
+            }
+
+            let refWindow = try await windowManager.findSCWindow(byID: windowID)
+            let actualWindow = refWindow ?? scWindow
             let scaleFactor = Int(NSScreen.main?.backingScaleFactor ?? 2.0)
-            let width = Int(scWindow.frame.width) * scaleFactor
-            let height = Int(scWindow.frame.height) * scaleFactor
+            let width = Int(actualWindow.frame.width) * scaleFactor
+            let height = Int(actualWindow.frame.height) * scaleFactor
 
             let encoder = try VideoEncoder(width: width, height: height)
 
@@ -200,34 +238,184 @@ final class ServerSession {
                 )
             }
 
-            let capture = WindowCaptureSession(window: scWindow, width: width, height: height)
+            let capture = WindowCaptureSession(window: actualWindow, width: width, height: height)
 
             capture.onFrame = { [weak encoder] sampleBuffer in
                 encoder?.encode(sampleBuffer: sampleBuffer)
             }
 
             capture.onError = { [weak self] error in
-                self?.send(.error("Capture error for window \(windowID): \(error.localizedDescription)"))
-                Task { await self?.stopStreaming(windowID: windowID) }
+                self?.queue.async {
+                    self?.send(.error("Capture error for window \(windowID): \(error.localizedDescription)"))
+                    Task { await self?.stopStreaming(windowID: windowID) }
+                }
             }
 
-            let app = scWindow.owningApplication
+            let app = actualWindow.owningApplication
             let info = WindowInfo(
                 windowID: windowID,
-                title: scWindow.title,
+                title: actualWindow.title,
                 appName: app?.applicationName,
                 bundleID: app?.bundleIdentifier,
-                bounds: CodableRect(cgRect: scWindow.frame),
+                bounds: CodableRect(cgRect: actualWindow.frame),
                 isOnScreen: true,
-                windowLayer: scWindow.windowLayer
+                windowLayer: actualWindow.windowLayer
             )
 
             try await capture.start()
             streams[windowID] = WindowStream(capture: capture, encoder: encoder, info: info)
-            send(.streamStarted(windowID: windowID, width: width, height: height))
+            let pointWidth = Int(scWindow.frame.width)
+            let pointHeight = Int(scWindow.frame.height)
+            send(.streamStarted(windowID: windowID, width: pointWidth, height: pointHeight))
         } catch {
             send(.error("Failed to start streaming: \(error.localizedDescription)"))
         }
+    }
+
+    private func recaptureStream(windowID: UInt32) async {
+        guard let oldStream = streams[windowID] else { return }
+        try? await oldStream.capture.stop()
+        try? await Task.sleep(nanoseconds: 200_000_000)
+
+        do {
+            guard let scWindow = try await windowManager.findSCWindow(byID: windowID) else { return }
+            let scaleFactor = Int(NSScreen.main?.backingScaleFactor ?? 2.0)
+            let pixelWidth = Int(scWindow.frame.width) * scaleFactor
+            let pixelHeight = Int(scWindow.frame.height) * scaleFactor
+
+            let encoder = try VideoEncoder(width: pixelWidth, height: pixelHeight)
+            encoder.onEncodedFrame = { [weak self] nalData, isKeyframe, pts, sps, pps in
+                self?.handleEncodedFrame(nalData: nalData, isKeyframe: isKeyframe, timestamp: pts, sps: sps, pps: pps, windowID: windowID)
+            }
+
+            let capture = WindowCaptureSession(window: scWindow, width: pixelWidth, height: pixelHeight)
+            capture.onFrame = { [weak encoder] sampleBuffer in encoder?.encode(sampleBuffer: sampleBuffer) }
+            capture.onError = { [weak self] error in
+                self?.queue.async {
+                    self?.send(.error("Capture error for window \(windowID): \(error.localizedDescription)"))
+                    Task { await self?.stopStreaming(windowID: windowID) }
+                }
+            }
+
+            try await capture.start()
+            var updatedInfo = oldStream.info
+            updatedInfo.bounds = CodableRect(cgRect: scWindow.frame)
+            streams[windowID] = WindowStream(capture: capture, encoder: encoder, info: updatedInfo, frameNumber: oldStream.frameNumber)
+
+            let pointWidth = Int(scWindow.frame.width)
+            let pointHeight = Int(scWindow.frame.height)
+            send(.streamStarted(windowID: windowID, width: pointWidth, height: pointHeight))
+            print("[ServerSession] Recaptured stream \(windowID): \(pixelWidth)x\(pixelHeight)")
+        } catch {
+            print("[ServerSession] Failed to recapture: \(error)")
+        }
+    }
+
+    private func restartStreaming(windowID: UInt32, width: Int, height: Int) async {
+        guard let oldStream = streams[windowID] else { return }
+
+        resizeServerWindow(windowInfo: oldStream.info, width: width, height: height)
+
+        try? await oldStream.capture.stop()
+
+        try? await Task.sleep(nanoseconds: 200_000_000)
+
+        do {
+            guard let scWindow = try await windowManager.findSCWindow(byID: windowID) else { return }
+
+            let actualWidth = Int(scWindow.frame.width)
+            let actualHeight = Int(scWindow.frame.height)
+            print("[ServerSession] Requested: \(width)x\(height), actual window frame: \(actualWidth)x\(actualHeight)")
+
+            let scaleFactor = Int(NSScreen.main?.backingScaleFactor ?? 2.0)
+            let pixelWidth = actualWidth * scaleFactor
+            let pixelHeight = actualHeight * scaleFactor
+
+            let encoder = try VideoEncoder(width: pixelWidth, height: pixelHeight)
+            encoder.onEncodedFrame = { [weak self] nalData, isKeyframe, pts, sps, pps in
+                self?.handleEncodedFrame(
+                    nalData: nalData,
+                    isKeyframe: isKeyframe,
+                    timestamp: pts,
+                    sps: sps,
+                    pps: pps,
+                    windowID: windowID
+                )
+            }
+
+            let capture = WindowCaptureSession(window: scWindow, width: pixelWidth, height: pixelHeight)
+            capture.onFrame = { [weak encoder] sampleBuffer in
+                encoder?.encode(sampleBuffer: sampleBuffer)
+            }
+            capture.onError = { [weak self] error in
+                self?.send(.error("Capture error for window \(windowID): \(error.localizedDescription)"))
+            }
+
+            try await capture.start()
+
+            var updatedInfo = oldStream.info
+            updatedInfo.bounds = CodableRect(cgRect: scWindow.frame)
+            streams[windowID] = WindowStream(capture: capture, encoder: encoder, info: updatedInfo, frameNumber: oldStream.frameNumber)
+
+            let pointWidth = Int(scWindow.frame.width)
+            let pointHeight = Int(scWindow.frame.height)
+            send(.streamStarted(windowID: windowID, width: pointWidth, height: pointHeight))
+            print("[ServerSession] Resized stream \(windowID) to \(pixelWidth)x\(pixelHeight) (points: \(pointWidth)x\(pointHeight))")
+        } catch {
+            print("[ServerSession] Failed to restart stream: \(error)")
+        }
+    }
+
+    private func resizeServerWindow(windowInfo: WindowInfo, width: Int, height: Int) {
+        guard let pid = findPid(for: windowInfo) else {
+            print("[ServerSession] Could not find PID for window resize")
+            return
+        }
+
+        let appElement = AXUIElementCreateApplication(pid)
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let axWindows = windowsRef as? [AXUIElement] else {
+            print("[ServerSession] Could not get AX windows")
+            return
+        }
+
+        for axWindow in axWindows {
+            var posRef: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(axWindow, kAXPositionAttribute as CFString, &posRef) == .success else { continue }
+            var pos = CGPoint.zero
+            AXValueGetValue(posRef as! AXValue, .cgPoint, &pos)
+
+            let bounds = windowInfo.bounds
+            if abs(pos.x - bounds.x) < 5 && abs(pos.y - bounds.y) < 5 {
+                var newSize = CGSize(width: CGFloat(width), height: CGFloat(height))
+                guard let sizeValue = AXValueCreate(.cgSize, &newSize) else { continue }
+                let result = AXUIElementSetAttributeValue(axWindow, kAXSizeAttribute as CFString, sizeValue)
+                print("[ServerSession] AX resize result: \(result == .success ? "success" : "failed (\(result.rawValue))")")
+                return
+            }
+        }
+        print("[ServerSession] Could not match AX window by position")
+    }
+
+    private func pidForApp(_ app: SCRunningApplication?) -> pid_t? {
+        guard let app = app else { return nil }
+        return app.processID
+    }
+
+    private func findPid(for windowInfo: WindowInfo) -> pid_t? {
+        if let bundleID = windowInfo.bundleID {
+            let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            if let pid = apps.first?.processIdentifier { return pid }
+        }
+        guard let windowList = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[CFString: Any]] else { return nil }
+        for entry in windowList {
+            if let wid = entry[kCGWindowNumber] as? UInt32, wid == windowInfo.windowID,
+               let pid = entry[kCGWindowOwnerPID] as? pid_t {
+                return pid
+            }
+        }
+        return nil
     }
 
     private func stopStreaming(windowID: UInt32) async {
@@ -244,34 +432,38 @@ final class ServerSession {
     }
 
     private func handleEncodedFrame(nalData: Data, isKeyframe: Bool, timestamp: CMTime, sps: Data?, pps: Data?, windowID: UInt32) {
-        guard state != .disconnected else { return }
-        guard var stream = streams[windowID] else { return }
+        queue.async { [weak self] in
+            guard let self = self, self.state != .disconnected else { return }
+            guard var stream = self.streams[windowID] else { return }
 
-        if stream.isSending && !isKeyframe {
-            return
+            if stream.isSending && !isKeyframe {
+                return
+            }
+
+            let header = VideoFrameHeader(
+                windowID: windowID,
+                frameNumber: stream.frameNumber,
+                flags: isKeyframe ? 0x01 : 0x00,
+                timestamp: UInt64(timestamp.value),
+                payloadSize: UInt32(nalData.count),
+                spsSize: UInt16(sps?.count ?? 0),
+                ppsSize: UInt16(pps?.count ?? 0)
+            )
+            stream.frameNumber += 1
+            stream.isSending = true
+            self.streams[windowID] = stream
+
+            let data = MessageCodec.encode(videoHeader: header, sps: sps, pps: pps, payload: nalData)
+            let sendStart = CFAbsoluteTimeGetCurrent()
+
+            self.connection.send(content: data, completion: .contentProcessed { [weak self] _ in
+                self?.queue.async {
+                    self?.streams[windowID]?.isSending = false
+                    let latency = CFAbsoluteTimeGetCurrent() - sendStart
+                    self?.recordSendLatency(latency)
+                }
+            })
         }
-
-        let header = VideoFrameHeader(
-            windowID: windowID,
-            frameNumber: stream.frameNumber,
-            flags: isKeyframe ? 0x01 : 0x00,
-            timestamp: UInt64(timestamp.value),
-            payloadSize: UInt32(nalData.count),
-            spsSize: UInt16(sps?.count ?? 0),
-            ppsSize: UInt16(pps?.count ?? 0)
-        )
-        stream.frameNumber += 1
-        stream.isSending = true
-        streams[windowID] = stream
-
-        let data = MessageCodec.encode(videoHeader: header, sps: sps, pps: pps, payload: nalData)
-        let sendStart = CFAbsoluteTimeGetCurrent()
-
-        connection.send(content: data, completion: .contentProcessed { [weak self] _ in
-            self?.streams[windowID]?.isSending = false
-            let latency = CFAbsoluteTimeGetCurrent() - sendStart
-            self?.recordSendLatency(latency)
-        })
     }
 
     private func recordSendLatency(_ latency: Double) {
@@ -334,12 +526,51 @@ final class ServerSession {
         connection.send(content: data, completion: .contentProcessed { _ in })
     }
 
+    func handleNewWindow(_ info: WindowInfo) {
+        queue.async { [weak self] in
+            guard let self = self, self.state == .connected else { return }
+            let streamingBundleIDs = Set(self.streams.values.compactMap { $0.info.bundleID })
+            if let bundleID = info.bundleID, streamingBundleIDs.contains(bundleID),
+               info.bounds.width >= 200, info.bounds.height >= 200,
+               info.title != nil, info.title != info.appName {
+                print("[ServerSession] Auto-streaming new window \(info.windowID) from \(bundleID) (\(Int(info.bounds.width))x\(Int(info.bounds.height)))")
+                self.send(.windowCreated(info))
+                Task { await self.startStreaming(windowID: info.windowID) }
+            } else {
+                self.send(.windowCreated(info))
+            }
+        }
+    }
+
+    func handleWindowDestroyed(_ windowID: UInt32) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.send(.windowDestroyed(windowID: windowID))
+            if self.streams[windowID] != nil {
+                Task { await self.stopStreaming(windowID: windowID) }
+            }
+        }
+    }
+
+    func handleWindowUpdated(_ info: WindowInfo) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            if let stream = self.streams[info.windowID] {
+                var updatedStream = stream
+                updatedStream.info = info
+                self.streams[info.windowID] = updatedStream
+            }
+            self.send(.windowUpdated(info))
+        }
+    }
+
     func disconnect() {
         guard state != .disconnected else { return }
         state = .disconnected
         stopCursorTracking()
         stopBitrateAdaptation()
         clipboardMonitor.stop()
+        virtualDisplayManager.tearDown()
         Task { await stopAllStreams() }
         connection.cancel()
     }

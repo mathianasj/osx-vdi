@@ -1,4 +1,5 @@
 import AppKit
+import IOKit.pwr_mgt
 import VDICore
 
 var port: UInt16 = 9876
@@ -14,6 +15,19 @@ app.setActivationPolicy(.accessory)
 
 PermissionManager.ensurePermissions()
 
+var sleepAssertionID: IOPMAssertionID = 0
+let result = IOPMAssertionCreateWithName(
+    kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
+    IOPMAssertionLevel(kIOPMAssertionLevelOn),
+    "VDI Server active — preventing screen lock" as CFString,
+    &sleepAssertionID
+)
+if result == kIOReturnSuccess {
+    print("Screen lock prevention enabled")
+} else {
+    print("Warning: Could not prevent screen lock")
+}
+
 let windowManager = WindowManager()
 var sessions: [ObjectIdentifier: ServerSession] = [:]
 
@@ -26,6 +40,21 @@ do {
         sessions[id] = session
     }
 
+    windowManager.onWindowCreated = { info in
+        for (_, session) in sessions {
+            session.handleNewWindow(info)
+        }
+    }
+    windowManager.onWindowDestroyed = { windowID in
+        for (_, session) in sessions {
+            session.handleWindowDestroyed(windowID)
+        }
+    }
+    windowManager.onWindowUpdated = { info in
+        for (_, session) in sessions {
+            session.handleWindowUpdated(info)
+        }
+    }
     windowManager.startTracking()
     print("VDI Server starting on port \(port)...")
     server.start()

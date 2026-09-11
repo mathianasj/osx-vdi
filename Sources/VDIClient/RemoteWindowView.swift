@@ -4,7 +4,6 @@ import IOSurface
 
 final class VideoContentView: NSView {
     override var acceptsFirstResponder: Bool { true }
-    private var dragOrigin: NSPoint?
     var remoteCursor: NSCursor?
 
     override func resetCursorRects() {
@@ -13,59 +12,50 @@ final class VideoContentView: NSView {
         }
     }
 
+    override func layout() {
+        super.layout()
+        layer?.sublayers?.forEach { $0.frame = bounds }
+    }
+
     override func keyDown(with event: NSEvent) {}
     override func keyUp(with event: NSEvent) {}
     override func flagsChanged(with event: NSEvent) {}
-
-    override func mouseDown(with event: NSEvent) {
-        if event.modifierFlags.contains(.option) {
-            dragOrigin = event.locationInWindow
-        }
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        dragOrigin = nil
-    }
-
+    override func mouseDown(with event: NSEvent) {}
+    override func mouseUp(with event: NSEvent) {}
     override func rightMouseDown(with event: NSEvent) {}
     override func rightMouseUp(with event: NSEvent) {}
-
     override func mouseMoved(with event: NSEvent) {}
-
-    override func mouseDragged(with event: NSEvent) {
-        guard let origin = dragOrigin, let window = self.window else { return }
-        let current = event.locationInWindow
-        let dx = current.x - origin.x
-        let dy = current.y - origin.y
-        var frame = window.frame
-        frame.origin.x += dx
-        frame.origin.y += dy
-        window.setFrameOrigin(frame.origin)
-    }
-
+    override func mouseDragged(with event: NSEvent) {}
     override func scrollWheel(with event: NSEvent) {}
 }
 
 final class RemoteWindowView {
     let nsWindow: NSWindow
     private let videoLayer: CALayer
+    var onResize: ((Int, Int) -> Void)?
+    var onDisplayChanged: ((Int) -> Void)?
+    private var resizeObserver: Any?
+    private var fullscreenObserver: Any?
+    private var screenChangeObserver: Any?
+    private var lastScreenIndex: Int = -1
 
     init(width: Int, height: Int, title: String = "VDI Remote Window", bundleID: String? = nil) {
         let contentRect = NSRect(x: 0, y: 0, width: width, height: height)
         nsWindow = NSWindow(
             contentRect: contentRect,
-            styleMask: .borderless,
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
+        nsWindow.title = title
         nsWindow.isOpaque = false
-        nsWindow.backgroundColor = .clear
+        nsWindow.backgroundColor = .black
         nsWindow.level = .normal
         nsWindow.hasShadow = true
         nsWindow.isReleasedWhenClosed = false
         nsWindow.acceptsMouseMovedEvents = true
-        nsWindow.isMovableByWindowBackground = false
         nsWindow.collectionBehavior = [.managed, .participatesInCycle, .fullScreenPrimary]
+
         if let bundleID = bundleID {
             nsWindow.tabbingIdentifier = "vdi-remote-\(bundleID)"
         }
@@ -78,7 +68,7 @@ final class RemoteWindowView {
         videoLayer = CALayer()
         videoLayer.frame = contentView.bounds
         videoLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-        videoLayer.contentsGravity = .resizeAspect
+        videoLayer.contentsGravity = .resize
         contentView.layer?.addSublayer(videoLayer)
     }
 
@@ -105,8 +95,9 @@ final class RemoteWindowView {
         }
     }
 
-    func updateCursor(imageData: Data, hotspotX: Int, hotspotY: Int) {
+    func updateCursor(imageData: Data, hotspotX: Int, hotspotY: Int, pointWidth: Double, pointHeight: Double) {
         guard let image = NSImage(data: imageData) else { return }
+        image.size = NSSize(width: pointWidth, height: pointHeight)
         let cursor = NSCursor(image: image, hotSpot: NSPoint(x: hotspotX, y: hotspotY))
 
         let apply = {
@@ -120,14 +111,56 @@ final class RemoteWindowView {
     }
 
     func show() {
-        if Thread.isMainThread {
-            nsWindow.makeKeyAndOrderFront(nil)
-            nsWindow.makeFirstResponder(nsWindow.contentView)
-        } else {
-            DispatchQueue.main.async { [weak self] in
-                self?.nsWindow.makeKeyAndOrderFront(nil)
-                self?.nsWindow.makeFirstResponder(self?.nsWindow.contentView)
+        let doShow = { [weak self] in
+            guard let self = self else { return }
+            self.nsWindow.makeKeyAndOrderFront(nil)
+            self.nsWindow.makeFirstResponder(self.nsWindow.contentView)
+            let notifyResize: (Notification) -> Void = { [weak self] _ in
+                guard let self = self, let contentView = self.nsWindow.contentView else { return }
+                let size = contentView.bounds.size
+                print("[RemoteWindowView] Resize: \(Int(size.width))x\(Int(size.height))")
+                self.onResize?(Int(size.width), Int(size.height))
             }
+            self.resizeObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didEndLiveResizeNotification,
+                object: self.nsWindow,
+                queue: .main,
+                using: notifyResize
+            )
+            self.fullscreenObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didEnterFullScreenNotification,
+                object: self.nsWindow,
+                queue: .main,
+                using: notifyResize
+            )
+            self.lastScreenIndex = self.currentScreenIndex()
+            self.screenChangeObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didChangeScreenNotification,
+                object: self.nsWindow,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self = self else { return }
+                let newIndex = self.currentScreenIndex()
+                if newIndex != self.lastScreenIndex {
+                    self.lastScreenIndex = newIndex
+                    print("[RemoteWindowView] Moved to display \(newIndex)")
+                    self.onDisplayChanged?(newIndex)
+                }
+            }
+        }
+
+        if Thread.isMainThread { doShow() }
+        else { DispatchQueue.main.async { doShow() } }
+    }
+
+    private func currentScreenIndex() -> Int {
+        guard let screen = nsWindow.screen else { return 0 }
+        return NSScreen.screens.firstIndex(of: screen) ?? 0
+    }
+
+    deinit {
+        for observer in [resizeObserver, fullscreenObserver, screenChangeObserver].compactMap({ $0 }) {
+            NotificationCenter.default.removeObserver(observer)
         }
     }
 }

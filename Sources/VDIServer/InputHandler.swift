@@ -64,14 +64,28 @@ final class InputHandler {
     }
 
     private func handleScrollEvent(_ event: InputEvent, windowInfo: WindowInfo) {
-        guard let cgEvent = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: Int32(event.scrollDeltaY), wheel2: Int32(event.scrollDeltaX), wheel3: 0) else { return }
+        let bounds = windowInfo.bounds
+        let screenX = bounds.x + event.x * bounds.width
+        let screenY = bounds.y + event.y * bounds.height
+        let point = CGPoint(x: screenX, y: screenY)
+
+        let dy = roundAwayFromZero(event.scrollDeltaY)
+        let dx = roundAwayFromZero(event.scrollDeltaX)
+
+        guard let cgEvent = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) else { return }
+
+        cgEvent.setDoubleValueField(.scrollWheelEventPointDeltaAxis1, value: event.scrollDeltaY)
+        cgEvent.setDoubleValueField(.scrollWheelEventPointDeltaAxis2, value: event.scrollDeltaX)
         cgEvent.flags = CGEventFlags(rawValue: event.modifiers)
 
-        if let pid = pidForWindow(windowInfo) {
-            cgEvent.postToPid(pid)
-        } else {
-            cgEvent.post(tap: .cghidEventTap)
-        }
+        CGWarpMouseCursorPosition(point)
+        cgEvent.post(tap: .cghidEventTap)
+    }
+
+    private func roundAwayFromZero(_ value: Double) -> Int32 {
+        if value > 0 { return max(1, Int32(value.rounded(.up))) }
+        if value < 0 { return min(-1, Int32(value.rounded(.down))) }
+        return 0
     }
 
     private func handleKeyEvent(_ event: InputEvent, windowInfo: WindowInfo) {

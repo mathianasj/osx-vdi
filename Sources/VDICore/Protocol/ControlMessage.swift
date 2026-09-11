@@ -64,6 +64,7 @@ public enum ControlMessage: Codable, Sendable {
     case hello(version: String)
     case helloResponse(version: String, serverName: String)
     case serverScreenInfo([ScreenInfo])
+    case clientDisplayInfo([ScreenInfo])
     case windowList([WindowInfo])
     case selectWindow(windowID: UInt32)
     case deselectWindow(windowID: UInt32)
@@ -74,7 +75,9 @@ public enum ControlMessage: Codable, Sendable {
     case windowUpdated(WindowInfo)
     case inputEvent(InputEvent)
     case requestKeyframe(windowID: UInt32)
-    case cursorUpdate(windowID: UInt32, imageData: Data, hotspotX: Int, hotspotY: Int)
+    case resizeWindow(windowID: UInt32, width: Int, height: Int)
+    case moveToDisplay(windowID: UInt32, displayIndex: Int)
+    case cursorUpdate(windowID: UInt32, imageData: Data, hotspotX: Int, hotspotY: Int, pointWidth: Double, pointHeight: Double)
     case clipboardUpdate(type: String, data: Data)
     case error(String)
 }

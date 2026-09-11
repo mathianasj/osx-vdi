@@ -10,7 +10,9 @@ final class WindowManager {
     var onWindowUpdated: ((WindowInfo) -> Void)?
 
     private var knownWindows: [UInt32: WindowInfo] = [:]
-    private var pollTimer: Timer?
+    private var observers: [pid_t: AXObserver] = [:]
+    private var watchedPIDs: Set<pid_t> = []
+    private var appObserverToken: Any?
 
     func discoverWindows() async throws -> [WindowInfo] {
         let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
@@ -19,9 +21,11 @@ final class WindowManager {
         let windows = content.windows.compactMap { window -> WindowInfo? in
             guard window.owningApplication?.processID != ownPID else { return nil }
             guard window.windowLayer == 0 else { return nil }
-            guard let title = window.title, !title.isEmpty else { return nil }
 
             let app = window.owningApplication
+            let title = window.title?.isEmpty == false ? window.title : app?.applicationName
+            guard title != nil else { return nil }
+
             return WindowInfo(
                 windowID: UInt32(window.windowID),
                 title: title,
@@ -46,19 +50,75 @@ final class WindowManager {
     }
 
     func startTracking() {
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { [weak self] in
-                await self?.pollForChanges()
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+            if app.processIdentifier != ownPID {
+                watchApp(pid: app.processIdentifier)
             }
+        }
+
+        appObserverToken = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            self?.watchApp(pid: app.processIdentifier)
         }
     }
 
     func stopTracking() {
-        pollTimer?.invalidate()
-        pollTimer = nil
+        for (_, observer) in observers {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        }
+        observers.removeAll()
+        watchedPIDs.removeAll()
+        if let token = appObserverToken {
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
+            appObserverToken = nil
+        }
     }
 
-    private func pollForChanges() async {
+    private func watchApp(pid: pid_t) {
+        guard !watchedPIDs.contains(pid) else { return }
+        watchedPIDs.insert(pid)
+
+        var observer: AXObserver?
+        let result = AXObserverCreate(pid, axCallback, &observer)
+        guard result == .success, let observer = observer else { return }
+
+        let appElement = AXUIElementCreateApplication(pid)
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+
+        AXObserverAddNotification(observer, appElement, kAXWindowCreatedNotification as CFString, selfPtr)
+        AXObserverAddNotification(observer, appElement, kAXUIElementDestroyedNotification as CFString, selfPtr)
+        AXObserverAddNotification(observer, appElement, kAXFocusedWindowChangedNotification as CFString, selfPtr)
+
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        observers[pid] = observer
+    }
+
+    fileprivate func handleAXNotification(_ notification: CFString, element: AXUIElement) {
+        let name = notification as String
+
+        if name == kAXWindowCreatedNotification as String {
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                await self?.refreshWindows()
+            }
+        } else if name == kAXUIElementDestroyedNotification as String {
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                await self?.refreshWindows()
+            }
+        } else if name == kAXFocusedWindowChangedNotification as String {
+            Task { [weak self] in
+                await self?.refreshWindows()
+            }
+        }
+    }
+
+    private func refreshWindows() async {
         guard let windows = try? await discoverCurrentWindows() else { return }
 
         let currentIDs = Set(windows.map { $0.windowID })
@@ -88,9 +148,11 @@ final class WindowManager {
         return content.windows.compactMap { window -> WindowInfo? in
             guard window.owningApplication?.processID != ownPID else { return nil }
             guard window.windowLayer == 0 else { return nil }
-            guard let title = window.title, !title.isEmpty else { return nil }
 
             let app = window.owningApplication
+            let title = window.title?.isEmpty == false ? window.title : app?.applicationName
+            guard title != nil else { return nil }
+
             return WindowInfo(
                 windowID: UInt32(window.windowID),
                 title: title,
@@ -111,4 +173,10 @@ final class WindowManager {
             print("[\(index + 1)] \(app) — \(title) (\(Int(bounds.width))x\(Int(bounds.height)))")
         }
     }
+}
+
+private func axCallback(observer: AXObserver, element: AXUIElement, notification: CFString, refcon: UnsafeMutableRawPointer?) {
+    guard let refcon = refcon else { return }
+    let manager = Unmanaged<WindowManager>.fromOpaque(refcon).takeUnretainedValue()
+    manager.handleAXNotification(notification, element: element)
 }
