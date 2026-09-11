@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VDI Launcher</title>
+    <style>
+        :root {
+            --bg: #1a1a2e;
+            --surface: #16213e;
+            --card: #0f3460;
+            --accent: #e94560;
+            --text: #eee;
+            --text-secondary: #aaa;
+            --border: #2a2a4a;
+            --success: #4ecca3;
+            --radius: 12px;
+        }
+
+        @media (prefers-color-scheme: light) {
+            :root {
+                --bg: #f0f2f5;
+                --surface: #fff;
+                --card: #fff;
+                --accent: #d63031;
+                --text: #2d3436;
+                --text-secondary: #636e72;
+                --border: #dfe6e9;
+                --success: #00b894;
+            }
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+
+        header {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 16px 32px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        header h1 {
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        .server-info {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .server-info .status-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--success);
+            margin-right: 6px;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 0;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 0 32px;
+        }
+
+        .tab {
+            padding: 12px 20px;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            color: var(--text-secondary);
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+
+        .tab:hover { color: var(--text); }
+        .tab.active {
+            color: var(--accent);
+            border-bottom-color: var(--accent);
+        }
+
+        main {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 32px;
+        }
+
+        .app-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 20px;
+        }
+
+        .app-card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 20px 16px;
+            text-align: center;
+            cursor: pointer;
+            transition: transform 0.15s, box-shadow 0.15s;
+        }
+
+        .app-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        }
+
+        .app-card.launching {
+            opacity: 0.6;
+            pointer-events: none;
+        }
+
+        .app-icon {
+            width: 64px;
+            height: 64px;
+            margin: 0 auto 12px;
+            border-radius: 14px;
+            background: var(--border);
+        }
+
+        .app-name {
+            font-size: 13px;
+            font-weight: 500;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .app-version {
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+
+        .spinner {
+            width: 64px;
+            height: 64px;
+            margin: 0 auto 12px;
+            border: 3px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .session-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .session-card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 16px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .session-info h3 {
+            font-size: 15px;
+            font-weight: 500;
+        }
+
+        .session-info p {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: opacity 0.2s;
+        }
+
+        .btn:hover { opacity: 0.85; }
+
+        .btn-connect {
+            background: var(--accent);
+            color: #fff;
+        }
+
+        .btn-disconnect {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            margin-left: 8px;
+        }
+
+        .admin-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .stat-card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 16px 20px;
+        }
+
+        .stat-card .label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .stat-card .value {
+            font-size: 24px;
+            font-weight: 600;
+            margin-top: 4px;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-secondary);
+        }
+
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.6);
+            z-index: 100;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-overlay.active { display: flex; }
+
+        .modal {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 24px;
+            max-width: 420px;
+            width: 90%;
+        }
+
+        .modal h2 {
+            font-size: 18px;
+            margin-bottom: 12px;
+        }
+
+        .modal p {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .modal code {
+            display: block;
+            background: var(--bg);
+            padding: 12px;
+            border-radius: 6px;
+            font-family: 'SF Mono', monospace;
+            font-size: 13px;
+            margin: 12px 0;
+            word-break: break-all;
+        }
+
+        .modal .btn {
+            margin-top: 16px;
+        }
+
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>VDI Launcher</h1>
+        <div class="server-info">
+            <span class="status-dot"></span>
+            <span id="server-name">Connecting...</span>
+        </div>
+    </header>
+
+    <div class="tabs">
+        <div class="tab active" data-tab="apps">Applications</div>
+        <div class="tab" data-tab="sessions">Active Sessions</div>
+        <div class="tab" data-tab="admin">Admin</div>
+    </div>
+
+    <main>
+        <section id="tab-apps">
+            <div class="app-grid" id="app-grid"></div>
+        </section>
+
+        <section id="tab-sessions" class="hidden">
+            <div class="session-list" id="session-list"></div>
+        </section>
+
+        <section id="tab-admin" class="hidden">
+            <div class="admin-stats" id="admin-stats"></div>
+            <h3 style="margin-bottom: 12px;">Active Sessions</h3>
+            <div class="session-list" id="admin-sessions"></div>
+        </section>
+    </main>
+
+    <div class="modal-overlay" id="connect-modal">
+        <div class="modal">
+            <h2 id="modal-title">Launching...</h2>
+            <p id="modal-message">Starting application on the server.</p>
+            <code id="modal-command" class="hidden"></code>
+            <button class="btn btn-connect" onclick="closeModal()">Close</button>
+        </div>
+    </div>
+
+    <script>
+        const BASE = '';
+        let currentTab = 'apps';
+
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                currentTab = tab.dataset.tab;
+                document.querySelectorAll('main > section').forEach(s => s.classList.add('hidden'));
+                document.getElementById('tab-' + currentTab).classList.remove('hidden');
+                if (currentTab === 'sessions') loadSessions();
+                if (currentTab === 'admin') loadAdmin();
+            });
+        });
+
+        async function loadApps() {
+            try {
+                const res = await fetch(BASE + '/api/apps');
+                const apps = await res.json();
+                const grid = document.getElementById('app-grid');
+
+                if (apps.length === 0) {
+                    grid.innerHTML = '<div class="empty-state">No applications found.</div>';
+                    return;
+                }
+
+                grid.innerHTML = apps.map(app => `
+                    <div class="app-card" data-bundle="${app.bundleID}" onclick="launchApp('${app.bundleID}', '${app.name}')">
+                        <img class="app-icon" src="${BASE}/api/apps/${encodeURIComponent(app.bundleID)}/icon"
+                             onerror="this.style.display='none'" alt="">
+                        <div class="app-name" title="${app.name}">${app.name}</div>
+                        <div class="app-version">${app.version}</div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                document.getElementById('app-grid').innerHTML =
+                    '<div class="empty-state">Failed to load applications.</div>';
+            }
+        }
+
+        async function launchApp(bundleID, name) {
+            const card = document.querySelector(`[data-bundle="${bundleID}"]`);
+            if (card) {
+                card.classList.add('launching');
+                const icon = card.querySelector('.app-icon');
+                if (icon) icon.outerHTML = '<div class="spinner"></div>';
+            }
+
+            showModal('Launching ' + name + '...', 'Starting application on the server.');
+
+            try {
+                const res = await fetch(BASE + '/api/apps/' + encodeURIComponent(bundleID) + '/launch', {
+                    method: 'POST'
+                });
+                const data = await res.json();
+
+                if (data.error) {
+                    showModal('Launch Failed', data.error);
+                } else {
+                    const host = location.hostname;
+                    const vdiURL = `vdi://connect?host=${host}&port=${data.streamingPort}&session=${data.sessionID}`;
+
+                    showModal(
+                        name + ' Launched',
+                        'The app is running. Connect with the VDI client:',
+                        `vdi-client --host ${host} --port ${data.streamingPort}`
+                    );
+
+                    window.location = vdiURL;
+                }
+            } catch (e) {
+                showModal('Launch Failed', 'Could not connect to the server.');
+            }
+
+            loadApps();
+        }
+
+        async function loadSessions() {
+            try {
+                const res = await fetch(BASE + '/api/sessions');
+                const sessions = await res.json();
+                const list = document.getElementById('session-list');
+
+                if (sessions.length === 0) {
+                    list.innerHTML = '<div class="empty-state">No active sessions.</div>';
+                    return;
+                }
+
+                list.innerHTML = sessions.map(s => `
+                    <div class="session-card">
+                        <div class="session-info">
+                            <h3>${s.appName || 'Unknown'}</h3>
+                            <p>Session: ${(s.sessionID || '').substring(0, 8)}... | Windows: ${s.windowCount || 0}</p>
+                        </div>
+                        <div>
+                            <button class="btn btn-connect" onclick="connectSession('${s.sessionID}')">Connect</button>
+                            <button class="btn btn-disconnect" onclick="deleteSession('${s.sessionID}')">End</button>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                document.getElementById('session-list').innerHTML =
+                    '<div class="empty-state">Failed to load sessions.</div>';
+            }
+        }
+
+        function connectSession(sessionID) {
+            const host = location.hostname;
+            window.location = `vdi://connect?host=${host}&port=9876&session=${sessionID}`;
+        }
+
+        async function deleteSession(sessionID) {
+            await fetch(BASE + '/api/sessions/' + sessionID, { method: 'DELETE' });
+            loadSessions();
+            if (currentTab === 'admin') loadAdmin();
+        }
+
+        async function loadAdmin() {
+            try {
+                const [statusRes, sessionsRes] = await Promise.all([
+                    fetch(BASE + '/api/server/status'),
+                    fetch(BASE + '/api/sessions')
+                ]);
+
+                const status = await statusRes.json();
+                const sessions = await sessionsRes.json();
+
+                const stats = document.getElementById('admin-stats');
+                const uptimeMin = Math.floor(status.uptimeSeconds / 60);
+                const uptimeHr = Math.floor(uptimeMin / 60);
+                const uptimeStr = uptimeHr > 0
+                    ? `${uptimeHr}h ${uptimeMin % 60}m`
+                    : `${uptimeMin}m`;
+
+                stats.innerHTML = `
+                    <div class="stat-card">
+                        <div class="label">Server</div>
+                        <div class="value">${status.hostname}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="label">Uptime</div>
+                        <div class="value">${uptimeStr}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="label">Clients</div>
+                        <div class="value">${status.connectedClients}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="label">Sessions</div>
+                        <div class="value">${sessions.length}</div>
+                    </div>
+                `;
+
+                const adminSessions = document.getElementById('admin-sessions');
+                if (sessions.length === 0) {
+                    adminSessions.innerHTML = '<div class="empty-state">No active sessions.</div>';
+                } else {
+                    adminSessions.innerHTML = sessions.map(s => `
+                        <div class="session-card">
+                            <div class="session-info">
+                                <h3>${s.appName || 'Unknown'}</h3>
+                                <p>Session: ${(s.sessionID || '').substring(0, 8)}... | Windows: ${s.windowCount || 0}</p>
+                            </div>
+                            <button class="btn btn-disconnect" onclick="deleteSession('${s.sessionID}')">Terminate</button>
+                        </div>
+                    `).join('');
+                }
+
+                document.getElementById('server-name').textContent = status.hostname;
+            } catch (e) {
+                document.getElementById('admin-stats').innerHTML =
+                    '<div class="empty-state">Failed to load server status.</div>';
+            }
+        }
+
+        function showModal(title, message, command) {
+            document.getElementById('modal-title').textContent = title;
+            document.getElementById('modal-message').textContent = message;
+            const cmdEl = document.getElementById('modal-command');
+            if (command) {
+                cmdEl.textContent = command;
+                cmdEl.classList.remove('hidden');
+            } else {
+                cmdEl.classList.add('hidden');
+            }
+            document.getElementById('connect-modal').classList.add('active');
+        }
+
+        function closeModal() {
+            document.getElementById('connect-modal').classList.remove('active');
+        }
+
+        // Initial load
+        loadApps();
+        fetch(BASE + '/api/server/status')
+            .then(r => r.json())
+            .then(s => {
+                document.getElementById('server-name').textContent = s.hostname;
+            })
+            .catch(() => {});
+
+        // Auto-refresh sessions
+        setInterval(() => {
+            if (currentTab === 'sessions') loadSessions();
+            if (currentTab === 'admin') loadAdmin();
+        }, 5000);
+    </script>
+</body>
+</html>

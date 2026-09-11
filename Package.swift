@@ -11,6 +11,9 @@ let package = Package(
         .executable(name: "vdi-server", targets: ["VDIServer"]),
         .executable(name: "vdi-client", targets: ["VDIClient"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
+    ],
     targets: [
         .target(
             name: "VDICore"
@@ -21,7 +24,14 @@ let package = Package(
         ),
         .executableTarget(
             name: "VDIServer",
-            dependencies: ["VDICore", "CGVirtualDisplayBridge"]
+            dependencies: [
+                "VDICore",
+                "CGVirtualDisplayBridge",
+                .product(name: "Hummingbird", package: "hummingbird"),
+            ],
+            resources: [
+                .copy("WebLauncher/Resources"),
+            ]
         ),
         .executableTarget(
             name: "VDIClient",
