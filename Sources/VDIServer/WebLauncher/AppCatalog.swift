@@ -27,7 +27,7 @@ final class AppCatalog {
         "com.apple.universalaccessd",
     ]
 
-    init(searchPaths: [String] = ["/Applications"], blocklist: Set<String> = AppCatalog.defaultBlocklist) {
+    init(searchPaths: [String] = ["/Applications", "/System/Applications"], blocklist: Set<String> = AppCatalog.defaultBlocklist) {
         self.searchPaths = searchPaths
         self.blocklist = blocklist
     }

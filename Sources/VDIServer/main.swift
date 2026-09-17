@@ -2,6 +2,8 @@ import AppKit
 import IOKit.pwr_mgt
 import VDICore
 
+signal(SIGPIPE, SIG_IGN)
+
 var port: UInt16 = 9876
 
 let args = CommandLine.arguments

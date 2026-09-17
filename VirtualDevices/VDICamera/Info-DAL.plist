@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.osx-vdi.camera</string>
+    <key>CFBundleName</key>
+    <string>VDI Camera</string>
+    <key>CFBundleExecutable</key>
+    <string>VDICamera</string>
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleGetInfoString</key>
+    <string>VDI Virtual Camera</string>
+    <key>CFPlugInFactories</key>
+    <dict>
+        <key>D4E5F6A7-B8C9-4D0E-1F2A-3B4C5D6E7F80</key>
+        <string>VDICameraPluginFactory</string>
+    </dict>
+    <key>CFPlugInTypes</key>
+    <dict>
+        <key>30010C1C-93BF-11D8-8B5B-000A95AF9C6A</key>
+        <array>
+            <string>D4E5F6A7-B8C9-4D0E-1F2A-3B4C5D6E7F80</string>
+        </array>
+    </dict>
+</dict>
+</plist>

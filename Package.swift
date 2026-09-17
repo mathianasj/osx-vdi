@@ -16,7 +16,12 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "VDICore"
+            name: "SHMBridge",
+            publicHeadersPath: "include"
+        ),
+        .target(
+            name: "VDICore",
+            dependencies: ["SHMBridge"]
         ),
         .target(
             name: "CGVirtualDisplayBridge",
@@ -27,7 +32,6 @@ let package = Package(
             dependencies: [
                 "VDICore",
                 "CGVirtualDisplayBridge",
-                .product(name: "Hummingbird", package: "hummingbird"),
             ],
             resources: [
                 .copy("WebLauncher/Resources"),

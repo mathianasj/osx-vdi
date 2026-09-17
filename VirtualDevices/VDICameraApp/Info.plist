@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.osx-vdi.camera-host</string>
+    <key>CFBundleName</key>
+    <string>VDI Camera Host</string>
+    <key>CFBundleDisplayName</key>
+    <string>VDI Camera Host</string>
+    <key>CFBundleExecutable</key>
+    <string>VDICameraHost</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSSystemExtensionUsageDescription</key>
+    <string>VDI Camera Host needs to install a virtual camera extension for remote desktop video.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>VDI Camera Host manages a virtual camera for remote desktop video.</string>
+</dict>
+</plist>

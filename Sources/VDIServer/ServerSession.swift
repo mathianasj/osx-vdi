@@ -34,6 +34,8 @@ final class ServerSession {
     private var sendLatencies: [Double] = []
     private var bitrateTimer: DispatchSourceTimer?
     private let virtualDisplayManager = VirtualDisplayManager()
+    private let virtualCamera = VirtualCameraProvider()
+    private let virtualMicrophone = VirtualMicrophoneProvider()
 
     init(connection: NWConnection, windowManager: WindowManager) {
         self.connection = connection
@@ -41,6 +43,32 @@ final class ServerSession {
 
         decoder.onControlMessage = { [weak self] message in
             self?.handleControlMessage(message)
+        }
+
+        decoder.onClientVideoFrame = { [weak self] header, data in
+            self?.virtualCamera.handleClientVideoFrame(header: header, data: data)
+        }
+
+        virtualCamera.onExtensionConnected = { [weak self] in
+            print("[ServerSession] Camera extension connected, requesting client camera")
+            self?.send(.requestClientCamera(width: 1280, height: 720))
+        }
+        virtualCamera.onExtensionDisconnected = { [weak self] in
+            print("[ServerSession] Camera extension disconnected, stopping client camera")
+            self?.send(.stopClientCamera)
+        }
+
+        decoder.onClientAudioFrame = { [weak self] header, data in
+            self?.virtualMicrophone.handleClientAudioFrame(header: header, data: data)
+        }
+
+        virtualMicrophone.onIOStarted = { [weak self] in
+            print("[ServerSession] Mic IO started, requesting client microphone")
+            self?.send(.requestClientMicrophone)
+        }
+        virtualMicrophone.onIOStopped = { [weak self] in
+            print("[ServerSession] Mic IO stopped, stopping client microphone")
+            self?.send(.stopClientMicrophone)
         }
 
         connection.stateUpdateHandler = { [weak self] state in
@@ -77,6 +105,8 @@ final class ServerSession {
             startCursorTracking()
             startClipboardMonitoring()
             startBitrateAdaptation()
+            virtualMicrophone.start()
+            virtualCamera.start()
             Task { await sendWindowList() }
 
         case .selectWindow(let windowID) where state == .connected || !streams.isEmpty:
@@ -122,6 +152,18 @@ final class ServerSession {
 
         case .clipboardUpdate(let type, let data):
             clipboardMonitor.applyRemoteClipboard(type: type, data: data)
+
+        case .clientCameraStarted(let width, let height):
+            print("[ServerSession] Client camera started: \(width)x\(height)")
+
+        case .clientMicrophoneStarted(let sampleRate, let channels):
+            print("[ServerSession] Client microphone started: \(sampleRate)Hz \(channels)ch")
+
+        case .clientCameraStopped:
+            print("[ServerSession] Client camera stopped")
+
+        case .clientMicrophoneStopped:
+            print("[ServerSession] Client microphone stopped")
 
         default:
             break
@@ -244,6 +286,14 @@ final class ServerSession {
                 encoder?.encode(sampleBuffer: sampleBuffer)
             }
 
+            capture.onIdleResume = { [weak encoder] in
+                encoder?.forceKeyframe()
+            }
+
+            capture.onAudioSample = { [weak self] sampleBuffer in
+                self?.handleAudioSample(sampleBuffer, windowID: windowID)
+            }
+
             capture.onError = { [weak self] error in
                 self?.queue.async {
                     self?.send(.error("Capture error for window \(windowID): \(error.localizedDescription)"))
@@ -263,9 +313,12 @@ final class ServerSession {
             )
 
             try await capture.start()
-            streams[windowID] = WindowStream(capture: capture, encoder: encoder, info: info)
+            let stream = WindowStream(capture: capture, encoder: encoder, info: info)
             let pointWidth = Int(scWindow.frame.width)
             let pointHeight = Int(scWindow.frame.height)
+            queue.sync {
+                self.streams[windowID] = stream
+            }
             send(.streamStarted(windowID: windowID, width: pointWidth, height: pointHeight))
         } catch {
             send(.error("Failed to start streaming: \(error.localizedDescription)"))
@@ -273,7 +326,8 @@ final class ServerSession {
     }
 
     private func recaptureStream(windowID: UInt32) async {
-        guard let oldStream = streams[windowID] else { return }
+        let oldStream = queue.sync { streams[windowID] }
+        guard let oldStream = oldStream else { return }
         try? await oldStream.capture.stop()
         try? await Task.sleep(nanoseconds: 200_000_000)
 
@@ -290,6 +344,10 @@ final class ServerSession {
 
             let capture = WindowCaptureSession(window: scWindow, width: pixelWidth, height: pixelHeight)
             capture.onFrame = { [weak encoder] sampleBuffer in encoder?.encode(sampleBuffer: sampleBuffer) }
+            capture.onIdleResume = { [weak encoder] in encoder?.forceKeyframe() }
+            capture.onAudioSample = { [weak self] sampleBuffer in
+                self?.handleAudioSample(sampleBuffer, windowID: windowID)
+            }
             capture.onError = { [weak self] error in
                 self?.queue.async {
                     self?.send(.error("Capture error for window \(windowID): \(error.localizedDescription)"))
@@ -300,7 +358,8 @@ final class ServerSession {
             try await capture.start()
             var updatedInfo = oldStream.info
             updatedInfo.bounds = CodableRect(cgRect: scWindow.frame)
-            streams[windowID] = WindowStream(capture: capture, encoder: encoder, info: updatedInfo, frameNumber: oldStream.frameNumber)
+            let stream = WindowStream(capture: capture, encoder: encoder, info: updatedInfo, frameNumber: oldStream.frameNumber)
+            queue.sync { self.streams[windowID] = stream }
 
             let pointWidth = Int(scWindow.frame.width)
             let pointHeight = Int(scWindow.frame.height)
@@ -312,7 +371,8 @@ final class ServerSession {
     }
 
     private func restartStreaming(windowID: UInt32, width: Int, height: Int) async {
-        guard let oldStream = streams[windowID] else { return }
+        let oldStream = queue.sync { streams[windowID] }
+        guard let oldStream = oldStream else { return }
 
         resizeServerWindow(windowInfo: oldStream.info, width: width, height: height)
 
@@ -347,6 +407,10 @@ final class ServerSession {
             capture.onFrame = { [weak encoder] sampleBuffer in
                 encoder?.encode(sampleBuffer: sampleBuffer)
             }
+            capture.onIdleResume = { [weak encoder] in encoder?.forceKeyframe() }
+            capture.onAudioSample = { [weak self] sampleBuffer in
+                self?.handleAudioSample(sampleBuffer, windowID: windowID)
+            }
             capture.onError = { [weak self] error in
                 self?.send(.error("Capture error for window \(windowID): \(error.localizedDescription)"))
             }
@@ -355,7 +419,8 @@ final class ServerSession {
 
             var updatedInfo = oldStream.info
             updatedInfo.bounds = CodableRect(cgRect: scWindow.frame)
-            streams[windowID] = WindowStream(capture: capture, encoder: encoder, info: updatedInfo, frameNumber: oldStream.frameNumber)
+            let stream = WindowStream(capture: capture, encoder: encoder, info: updatedInfo, frameNumber: oldStream.frameNumber)
+            queue.sync { self.streams[windowID] = stream }
 
             let pointWidth = Int(scWindow.frame.width)
             let pointHeight = Int(scWindow.frame.height)
@@ -419,16 +484,50 @@ final class ServerSession {
     }
 
     private func stopStreaming(windowID: UInt32) async {
-        guard let stream = streams.removeValue(forKey: windowID) else { return }
+        let stream = queue.sync { streams.removeValue(forKey: windowID) }
+        guard let stream = stream else { return }
         try? await stream.capture.stop()
         send(.streamStopped(windowID: windowID))
     }
 
     private func stopAllStreams() async {
-        let windowIDs = Array(streams.keys)
+        let windowIDs = queue.sync { Array(streams.keys) }
         for windowID in windowIDs {
             await stopStreaming(windowID: windowID)
         }
+    }
+
+    private func handleAudioSample(_ sampleBuffer: CMSampleBuffer, windowID: UInt32) {
+        guard state != .disconnected else { return }
+
+        guard let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+
+        var totalLength = 0
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        CMBlockBufferGetDataPointer(dataBuffer, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &totalLength, dataPointerOut: &dataPointer)
+        guard let ptr = dataPointer, totalLength > 0 else { return }
+
+        let pcmData = Data(bytes: ptr, count: totalLength)
+
+        var sampleRate: UInt32 = 48000
+        var channels: UInt16 = 2
+        if let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
+           let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) {
+            sampleRate = UInt32(asbd.pointee.mSampleRate)
+            channels = UInt16(asbd.pointee.mChannelsPerFrame)
+        }
+
+        let header = AudioFrameHeader(
+            windowID: windowID,
+            timestamp: UInt64(pts.value),
+            sampleRate: sampleRate,
+            channels: channels,
+            payloadSize: UInt32(pcmData.count)
+        )
+
+        let data = MessageCodec.encode(audioHeader: header, payload: pcmData)
+        connection.send(content: data, completion: .contentProcessed { _ in })
     }
 
     private func handleEncodedFrame(nalData: Data, isKeyframe: Bool, timestamp: CMTime, sps: Data?, pps: Data?, windowID: UInt32) {
@@ -437,6 +536,7 @@ final class ServerSession {
             guard var stream = self.streams[windowID] else { return }
 
             if stream.isSending && !isKeyframe {
+                stream.encoder.forceKeyframe()
                 return
             }
 
@@ -571,6 +671,8 @@ final class ServerSession {
         stopBitrateAdaptation()
         clipboardMonitor.stop()
         virtualDisplayManager.tearDown()
+        virtualCamera.stop()
+        virtualMicrophone.stop()
         Task { await stopAllStreams() }
         connection.cancel()
     }

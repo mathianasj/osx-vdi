@@ -16,6 +16,7 @@ final class ConnectionManager {
 
     private let host: String
     private let port: UInt16
+    private let targetBundleID: String?
     private let client: TCPClient
     private let streamDecoder = StreamDecoder()
     private var serverName: String?
@@ -23,10 +24,13 @@ final class ConnectionManager {
     private var windowSessions: [UInt32: WindowSession] = [:]
     private let layoutManager = WindowLayoutManager()
     private let clipboardMonitor = ClipboardMonitor()
+    private let audioPlayer = AudioPlayer()
+    private let clientMedia = ClientMediaManager()
 
-    init(host: String, port: UInt16) {
+    init(host: String, port: UInt16, targetBundleID: String? = nil) {
         self.host = host
         self.port = port
+        self.targetBundleID = targetBundleID
         self.client = TCPClient(host: host, port: port)
 
         setupHandlers()
@@ -64,6 +68,34 @@ final class ConnectionManager {
         streamDecoder.onVideoFrame = { [weak self] header, data in
             self?.handleVideoFrame(header: header, data: data)
         }
+
+        streamDecoder.onAudioFrame = { [weak self] header, data in
+            self?.audioPlayer.play(header: header, data: data)
+        }
+
+        clientMedia.onVideoData = { [weak self] data in
+            self?.client.send(data)
+        }
+
+        clientMedia.onAudioData = { [weak self] data in
+            self?.client.send(data)
+        }
+
+        clientMedia.onCameraStarted = { [weak self] width, height in
+            self?.sendControl(.clientCameraStarted(width: width, height: height))
+        }
+
+        clientMedia.onMicrophoneStarted = { [weak self] sampleRate, channels in
+            self?.sendControl(.clientMicrophoneStarted(sampleRate: sampleRate, channels: channels))
+        }
+
+        clientMedia.onCameraStopped = { [weak self] in
+            self?.sendControl(.clientCameraStopped)
+        }
+
+        clientMedia.onMicrophoneStopped = { [weak self] in
+            self?.sendControl(.clientMicrophoneStopped)
+        }
     }
 
     private func handleControlMessage(_ message: ControlMessage) {
@@ -85,9 +117,25 @@ final class ConnectionManager {
                 let app = w.appName ?? "Unknown"
                 print("  [\(i + 1)] \(app) — \(title) (\(Int(w.bounds.width))x\(Int(w.bounds.height)))")
             }
-            print("\nEnter window number to stream (or 'q' to quit):")
-            DispatchQueue.global().async { [weak self] in
-                self?.readWindowSelection()
+
+            if let bundleID = targetBundleID {
+                let matching = windows.filter { $0.bundleID == bundleID }
+                if matching.isEmpty {
+                    print("No windows found for \(bundleID), retrying in 2s...")
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 2) { [weak self] in
+                        self?.sendControl(.hello(version: "1.0"))
+                    }
+                } else {
+                    print("Auto-selecting \(matching.count) window(s) for \(bundleID)")
+                    for window in matching {
+                        sendControl(.selectWindow(windowID: window.windowID))
+                    }
+                }
+            } else {
+                print("\nEnter window number to stream (or 'q' to quit):")
+                DispatchQueue.global().async { [weak self] in
+                    self?.readWindowSelection()
+                }
             }
 
         case .streamStarted(let windowID, let width, let height):
@@ -161,6 +209,20 @@ final class ConnectionManager {
 
         case .clipboardUpdate(let type, let data):
             clipboardMonitor.applyRemoteClipboard(type: type, data: data)
+
+        case .requestClientCamera(let width, let height):
+            print("Server requested camera: \(width)x\(height)")
+            clientMedia.startCamera(width: width, height: height)
+
+        case .requestClientMicrophone:
+            print("Server requested microphone")
+            clientMedia.startMicrophone()
+
+        case .stopClientCamera:
+            clientMedia.stopCamera()
+
+        case .stopClientMicrophone:
+            clientMedia.stopMicrophone()
 
         case .error(let message):
             print("Server error: \(message)")
@@ -250,6 +312,8 @@ final class ConnectionManager {
 
     func disconnect() {
         clipboardMonitor.stop()
+        audioPlayer.stop()
+        clientMedia.stopAll()
         for (_, session) in windowSessions {
             session.forwarder?.stop()
         }

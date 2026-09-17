@@ -1,17 +1,18 @@
 import Foundation
 import VideoToolbox
 import CoreMedia
-import VDICore
 
-final class VideoDecoder {
+public final class VideoDecoder {
     private var session: VTDecompressionSession?
     private var formatDescription: CMVideoFormatDescription?
     private var currentSPS: Data?
     private var currentPPS: Data?
 
-    var onDecodedFrame: ((CVPixelBuffer, CMTime) -> Void)?
+    public var onDecodedFrame: ((CVPixelBuffer, CMTime) -> Void)?
 
-    func decode(frameHeader: VideoFrameHeader, frameData: Data) {
+    public init() {}
+
+    public func decode(frameHeader: VideoFrameHeader, frameData: Data) {
         let nalOffset: Int
 
         if frameHeader.isKeyframe {

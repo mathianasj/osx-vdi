@@ -2,8 +2,8 @@ import Foundation
 import VideoToolbox
 import CoreMedia
 
-final class VideoEncoder {
-    enum BitrateLevel: Int, CaseIterable {
+public final class VideoEncoder {
+    public enum BitrateLevel: Int, CaseIterable, Sendable {
         case poor = 1_000_000
         case fair = 2_000_000
         case good = 4_000_000
@@ -15,13 +15,14 @@ final class VideoEncoder {
     private var forceNextKeyframe = false
     private let width: Int32
     private let height: Int32
-    private(set) var currentBitrate: Int = 20_000_000
+    public private(set) var currentBitrate: Int
 
-    var onEncodedFrame: ((Data, Bool, CMTime, Data?, Data?) -> Void)?
+    public var onEncodedFrame: ((Data, Bool, CMTime, Data?, Data?) -> Void)?
 
-    init(width: Int, height: Int) throws {
+    public init(width: Int, height: Int, bitrate: Int = 20_000_000, keyframeInterval: Int = 30, frameRate: Int = 60) throws {
         self.width = Int32(width)
         self.height = Int32(height)
+        self.currentBitrate = bitrate
 
         let encoderSpec: [CFString: Any] = [
             kVTVideoEncoderSpecification_EnableLowLatencyRateControl: true
@@ -54,28 +55,25 @@ final class VideoEncoder {
         }
         self.session = session
 
-        configureSession(session)
-        VTCompressionSessionPrepareToEncodeFrames(session)
-    }
-
-    private func configureSession(_ session: VTCompressionSession) {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Main_AutoLevel)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 120 as CFNumber)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 60 as CFNumber)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: 20_000_000 as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: keyframeInterval as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: frameRate as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+
+        VTCompressionSessionPrepareToEncodeFrames(session)
     }
 
-    func encode(sampleBuffer: CMSampleBuffer) {
+    public func encode(sampleBuffer: CMSampleBuffer) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         encode(pixelBuffer: pixelBuffer, presentationTimeStamp: pts)
     }
 
-    func encode(pixelBuffer: CVPixelBuffer, presentationTimeStamp: CMTime) {
+    public func encode(pixelBuffer: CVPixelBuffer, presentationTimeStamp: CMTime) {
         guard let session = session else { return }
 
         var properties: [CFString: Any]? = nil
@@ -95,11 +93,11 @@ final class VideoEncoder {
         )
     }
 
-    func forceKeyframe() {
+    public func forceKeyframe() {
         forceNextKeyframe = true
     }
 
-    func setBitrate(_ bitrate: Int) {
+    public func setBitrate(_ bitrate: Int) {
         guard let session = session, bitrate != currentBitrate else { return }
         currentBitrate = bitrate
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
@@ -161,6 +159,6 @@ final class VideoEncoder {
     }
 }
 
-enum VideoEncoderError: Error {
+public enum VideoEncoderError: Error {
     case sessionCreationFailed(OSStatus)
 }

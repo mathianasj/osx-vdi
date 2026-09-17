@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.osx-vdi.camera-extension</string>
+    <key>MachServices</key>
+    <dict>
+        <key>com.osx-vdi.camera-extension</key>
+        <true/>
+    </dict>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/VDICameraHost.app/Contents/PlugIns/com.osx-vdi.camera-extension.appex/Contents/MacOS/VDICamera</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>

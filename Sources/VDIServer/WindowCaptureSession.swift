@@ -10,6 +10,8 @@ final class WindowCaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
     private let captureQueue = DispatchQueue(label: "com.osx-vdi.capture", qos: .userInteractive)
 
     var onFrame: ((CMSampleBuffer) -> Void)?
+    var onAudioSample: ((CMSampleBuffer) -> Void)?
+    var onIdleResume: (() -> Void)?
     var onError: ((Error) -> Void)?
     private var idleFrameCount: Int = 0
     private static let idleThreshold = 120 // ~2 seconds at 60fps
@@ -33,9 +35,13 @@ final class WindowCaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
         config.ignoreShadowsSingleWindow = true
         config.width = width
         config.height = height
+        config.capturesAudio = true
+        config.sampleRate = 48000
+        config.channelCount = 2
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
+        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: captureQueue)
         try await stream.startCapture()
         self.stream = stream
     }
@@ -47,25 +53,38 @@ final class WindowCaptureSession: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen else { return }
-
-        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
-              let statusValue = attachments.first?[.status] as? Int,
-              let status = SCFrameStatus(rawValue: statusValue),
-              status == .complete else {
-            return
-        }
-
-        if let dirtyRects = attachments.first?[.dirtyRects] as? [CGRect], dirtyRects.isEmpty {
-            idleFrameCount += 1
-            if idleFrameCount > Self.idleThreshold {
+        switch type {
+        case .screen:
+            guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
+                  let statusValue = attachments.first?[.status] as? Int,
+                  let status = SCFrameStatus(rawValue: statusValue),
+                  status == .complete else {
                 return
             }
-        } else {
-            idleFrameCount = 0
-        }
 
-        onFrame?(sampleBuffer)
+            if let dirtyRects = attachments.first?[.dirtyRects] as? [CGRect], dirtyRects.isEmpty {
+                idleFrameCount += 1
+                if idleFrameCount > Self.idleThreshold {
+                    return
+                }
+            } else {
+                if idleFrameCount > Self.idleThreshold {
+                    onIdleResume?()
+                }
+                idleFrameCount = 0
+            }
+
+            onFrame?(sampleBuffer)
+
+        case .audio:
+            onAudioSample?(sampleBuffer)
+
+        case .microphone:
+            break
+
+        @unknown default:
+            break
+        }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {

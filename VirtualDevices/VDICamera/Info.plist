@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.osx-vdi.camera-host.extension</string>
+    <key>CFBundleName</key>
+    <string>VDI Camera</string>
+    <key>CFBundleDisplayName</key>
+    <string>VDI Camera</string>
+    <key>CFBundleExecutable</key>
+    <string>VDICamera</string>
+    <key>CFBundlePackageType</key>
+    <string>SYSX</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.cmio.registerassistantservice</string>
+        <key>NSExtensionPrincipalClass</key>
+        <string>VDICameraProviderSource</string>
+        <key>CMIOExtensionMachServiceName</key>
+        <string>KGJ96X8EE3.com.osx-vdi.camera-host.extension</string>
+    </dict>
+    <key>CMIOExtension</key>
+    <dict>
+        <key>CMIOExtensionMachServiceName</key>
+        <string>KGJ96X8EE3.com.osx-vdi.camera-host.extension</string>
+    </dict>
+    <key>NSSystemExtensionUsageDescription</key>
+    <string>VDI Camera provides a virtual camera for remote desktop video.</string>
+</dict>
+</plist>

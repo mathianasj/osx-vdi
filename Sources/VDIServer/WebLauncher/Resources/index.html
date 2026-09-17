@@ -377,11 +377,7 @@
             const card = document.querySelector(`[data-bundle="${bundleID}"]`);
             if (card) {
                 card.classList.add('launching');
-                const icon = card.querySelector('.app-icon');
-                if (icon) icon.outerHTML = '<div class="spinner"></div>';
             }
-
-            showModal('Launching ' + name + '...', 'Starting application on the server.');
 
             try {
                 const res = await fetch(BASE + '/api/apps/' + encodeURIComponent(bundleID) + '/launch', {
@@ -389,22 +385,12 @@
                 });
                 const data = await res.json();
 
-                if (data.error) {
-                    showModal('Launch Failed', data.error);
-                } else {
+                if (!data.error) {
                     const host = location.hostname;
-                    const vdiURL = `vdi://connect?host=${host}&port=${data.streamingPort}&session=${data.sessionID}`;
-
-                    showModal(
-                        name + ' Launched',
-                        'The app is running. Connect with the VDI client:',
-                        `vdi-client --host ${host} --port ${data.streamingPort}`
-                    );
-
-                    window.location = vdiURL;
+                    window.location = `vdi://connect?host=${host}&port=${data.streamingPort}&session=${data.sessionID}&bundleID=${encodeURIComponent(bundleID)}`;
                 }
             } catch (e) {
-                showModal('Launch Failed', 'Could not connect to the server.');
+                console.error('Launch failed:', e);
             }
 
             loadApps();

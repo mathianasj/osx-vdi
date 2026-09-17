@@ -3,16 +3,18 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var host: String
     private var port: UInt16
+    private var targetBundleID: String?
     private var connectionManager: ConnectionManager?
 
-    init(host: String, port: UInt16) {
+    init(host: String, port: UInt16, targetBundleID: String? = nil) {
         self.host = host
         self.port = port
+        self.targetBundleID = targetBundleID
         super.init()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let manager = ConnectionManager(host: host, port: port)
+        let manager = ConnectionManager(host: host, port: port, targetBundleID: targetBundleID)
         self.connectionManager = manager
         manager.connect()
     }
@@ -36,15 +38,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let newHost = params.first(where: { $0.name == "host" })?.value ?? host
         let newPort = params.first(where: { $0.name == "port" })?.value.flatMap { UInt16($0) } ?? port
+        let bundleID = params.first(where: { $0.name == "bundleID" })?.value
 
-        print("[VDI Client] URL connect: \(newHost):\(newPort)")
+        print("[VDI Client] URL connect: \(newHost):\(newPort) bundleID: \(bundleID ?? "none")")
 
         connectionManager?.disconnect()
 
         host = newHost
         port = newPort
+        targetBundleID = bundleID
 
-        let manager = ConnectionManager(host: host, port: port)
+        let manager = ConnectionManager(host: host, port: port, targetBundleID: bundleID)
         self.connectionManager = manager
         manager.connect()
     }

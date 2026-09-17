@@ -31,5 +31,9 @@
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSCameraUsageDescription</key>
+    <string>VDI Client needs camera access to share your camera with the remote session.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>VDI Client needs microphone access to share your microphone with the remote session.</string>
 </dict>
 </plist>

@@ -3,6 +3,9 @@ import Foundation
 public enum MessageType: UInt8, Sendable {
     case control = 0x01
     case video = 0x02
+    case audio = 0x03
+    case clientVideo = 0x04
+    case clientAudio = 0x05
 }
 
 public enum MessageCodec {
@@ -23,6 +26,26 @@ public enum MessageCodec {
         return frame(type: .video, payload: body)
     }
 
+    public static func encode(audioHeader: AudioFrameHeader, payload: Data) -> Data {
+        var body = audioHeader.serialize()
+        body.append(payload)
+        return frame(type: .audio, payload: body)
+    }
+
+    public static func encode(clientVideoHeader: VideoFrameHeader, sps: Data?, pps: Data?, payload: Data) -> Data {
+        var body = clientVideoHeader.serialize()
+        if let sps = sps { body.append(sps) }
+        if let pps = pps { body.append(pps) }
+        body.append(payload)
+        return frame(type: .clientVideo, payload: body)
+    }
+
+    public static func encode(clientAudioHeader: AudioFrameHeader, payload: Data) -> Data {
+        var body = clientAudioHeader.serialize()
+        body.append(payload)
+        return frame(type: .clientAudio, payload: body)
+    }
+
     private static func frame(type: MessageType, payload: Data) -> Data {
         var data = Data(capacity: 1 + 4 + payload.count)
         data.append(type.rawValue)
@@ -37,6 +60,9 @@ public final class StreamDecoder {
 
     public var onControlMessage: ((ControlMessage) -> Void)?
     public var onVideoFrame: ((VideoFrameHeader, Data) -> Void)?
+    public var onAudioFrame: ((AudioFrameHeader, Data) -> Void)?
+    public var onClientVideoFrame: ((VideoFrameHeader, Data) -> Void)?
+    public var onClientAudioFrame: ((AudioFrameHeader, Data) -> Void)?
 
     public init() {}
 
@@ -70,6 +96,27 @@ public final class StreamDecoder {
                     let frameStart = payloadData.startIndex + VideoFrameHeader.serializedSize
                     let frameData = payloadData[frameStart ..< payloadData.endIndex]
                     onVideoFrame?(header, Data(frameData))
+                }
+            case MessageType.audio.rawValue:
+                let payloadData = Data(payload)
+                if let header = AudioFrameHeader.deserialize(from: payloadData) {
+                    let frameStart = payloadData.startIndex + AudioFrameHeader.serializedSize
+                    let frameData = payloadData[frameStart ..< payloadData.endIndex]
+                    onAudioFrame?(header, Data(frameData))
+                }
+            case MessageType.clientVideo.rawValue:
+                let payloadData = Data(payload)
+                if let header = VideoFrameHeader.deserialize(from: payloadData) {
+                    let frameStart = payloadData.startIndex + VideoFrameHeader.serializedSize
+                    let frameData = payloadData[frameStart ..< payloadData.endIndex]
+                    onClientVideoFrame?(header, Data(frameData))
+                }
+            case MessageType.clientAudio.rawValue:
+                let payloadData = Data(payload)
+                if let header = AudioFrameHeader.deserialize(from: payloadData) {
+                    let frameStart = payloadData.startIndex + AudioFrameHeader.serializedSize
+                    let frameData = payloadData[frameStart ..< payloadData.endIndex]
+                    onClientAudioFrame?(header, Data(frameData))
                 }
             default:
                 break

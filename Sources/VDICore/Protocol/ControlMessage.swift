@@ -79,5 +79,13 @@ public enum ControlMessage: Codable, Sendable {
     case moveToDisplay(windowID: UInt32, displayIndex: Int)
     case cursorUpdate(windowID: UInt32, imageData: Data, hotspotX: Int, hotspotY: Int, pointWidth: Double, pointHeight: Double)
     case clipboardUpdate(type: String, data: Data)
+    case requestClientCamera(width: Int, height: Int)
+    case requestClientMicrophone
+    case stopClientCamera
+    case stopClientMicrophone
+    case clientCameraStarted(width: Int, height: Int)
+    case clientMicrophoneStarted(sampleRate: UInt32, channels: UInt16)
+    case clientCameraStopped
+    case clientMicrophoneStopped
     case error(String)
 }

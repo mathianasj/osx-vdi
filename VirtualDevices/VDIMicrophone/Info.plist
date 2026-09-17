@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.osx-vdi.microphone</string>
+    <key>CFBundleName</key>
+    <string>VDI Microphone</string>
+    <key>CFBundleExecutable</key>
+    <string>VDIMicrophone</string>
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>AudioServerPlugIn</key>
+    <dict>
+        <key>ResourceBundlePath</key>
+        <string>Contents/Resources</string>
+    </dict>
+    <key>CFBundleGetInfoString</key>
+    <string>VDI Virtual Microphone</string>
+    <key>CFPlugInFactories</key>
+    <dict>
+        <key>B5C9E2D1-4A3F-4E8B-9C7D-1A2B3C4D5E6F</key>
+        <string>VDIMicDriverFactory</string>
+    </dict>
+    <key>CFPlugInTypes</key>
+    <dict>
+        <key>443ABAB8-E7B3-491A-B985-BEB9187030DB</key>
+        <array>
+            <string>B5C9E2D1-4A3F-4E8B-9C7D-1A2B3C4D5E6F</string>
+        </array>
+    </dict>
+</dict>
+</plist>
