@@ -4,11 +4,11 @@ import CoreMedia
 
 public final class VideoEncoder {
     public enum BitrateLevel: Int, CaseIterable, Sendable {
-        case poor = 1_000_000
-        case fair = 2_000_000
-        case good = 4_000_000
-        case excellent = 8_000_000
-        case high = 20_000_000
+        case poor = 2_000_000
+        case fair = 5_000_000
+        case good = 10_000_000
+        case excellent = 20_000_000
+        case high = 50_000_000
     }
 
     private var session: VTCompressionSession?
@@ -19,7 +19,7 @@ public final class VideoEncoder {
 
     public var onEncodedFrame: ((Data, Bool, CMTime, Data?, Data?) -> Void)?
 
-    public init(width: Int, height: Int, bitrate: Int = 20_000_000, keyframeInterval: Int = 30, frameRate: Int = 60) throws {
+    public init(width: Int, height: Int, bitrate: Int = 50_000_000, keyframeInterval: Int = 15, frameRate: Int = 60) throws {
         self.width = Int32(width)
         self.height = Int32(height)
         self.currentBitrate = bitrate
@@ -56,11 +56,10 @@ public final class VideoEncoder {
         self.session = session
 
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Main_AutoLevel)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: keyframeInterval as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: frameRate as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
 

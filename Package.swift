@@ -10,6 +10,7 @@ let package = Package(
     products: [
         .executable(name: "vdi-server", targets: ["VDIServer"]),
         .executable(name: "vdi-client", targets: ["VDIClient"]),
+        .executable(name: "vdi-audio-test", targets: ["VDIAudioTest"]),
     ],
     dependencies: [
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
@@ -39,6 +40,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "VDIClient",
+            dependencies: ["VDICore"]
+        ),
+        .executableTarget(
+            name: "VDIAudioTest",
             dependencies: ["VDICore"]
         ),
         .testTarget(

@@ -21,14 +21,16 @@ final class CameraCapture: NSObject {
         super.init()
     }
 
-    func start() -> Bool {
+    func start(device: AVCaptureDevice? = nil) -> Bool {
         let session = AVCaptureSession()
         session.sessionPreset = .high
 
-        guard let camera = AVCaptureDevice.default(for: .video) else {
+        let camera = device ?? AVCaptureDevice.default(for: .video)
+        guard let camera = camera else {
             print("[CameraCapture] No camera available")
             return false
         }
+        print("[CameraCapture] Using device: \(camera.localizedName)")
 
         do {
             let input = try AVCaptureDeviceInput(device: camera)

@@ -9,13 +9,34 @@ final class MicrophoneCapture: NSObject {
 
     var onAudioSample: ((CMSampleBuffer) -> Void)?
 
-    func start() -> Bool {
+    func start(device: AVCaptureDevice? = nil) -> Bool {
+        let authStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        print("[MicrophoneCapture] Authorization status: \(authStatus.rawValue) (0=notDetermined, 1=restricted, 2=denied, 3=authorized)")
+
+        if authStatus == .notDetermined {
+            print("[MicrophoneCapture] Requesting microphone permission...")
+            let semaphore = DispatchSemaphore(value: 0)
+            var granted = false
+            AVCaptureDevice.requestAccess(for: .audio) { result in
+                granted = result
+                semaphore.signal()
+            }
+            semaphore.wait()
+            print("[MicrophoneCapture] Permission \(granted ? "granted" : "denied")")
+            if !granted { return false }
+        } else if authStatus != .authorized {
+            print("[MicrophoneCapture] Microphone access denied/restricted")
+            return false
+        }
+
         let session = AVCaptureSession()
 
-        guard let mic = AVCaptureDevice.default(for: .audio) else {
+        let mic = device ?? AVCaptureDevice.default(for: .audio)
+        guard let mic = mic else {
             print("[MicrophoneCapture] No microphone available")
             return false
         }
+        print("[MicrophoneCapture] Using device: \(mic.localizedName) (\(mic.uniqueID))")
 
         do {
             let input = try AVCaptureDeviceInput(device: mic)

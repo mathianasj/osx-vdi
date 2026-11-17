@@ -1,6 +1,7 @@
 import AppKit
 import CoreVideo
 import IOSurface
+import QuartzCore
 
 final class VideoContentView: NSView {
     override var acceptsFirstResponder: Bool { true }
@@ -36,6 +37,7 @@ final class RemoteWindowView {
     var onDisplayChanged: ((Int) -> Void)?
     private var resizeObserver: Any?
     private var fullscreenObserver: Any?
+    private var exitFullscreenObserver: Any?
     private var screenChangeObserver: Any?
     private var lastScreenIndex: Int = -1
 
@@ -48,7 +50,7 @@ final class RemoteWindowView {
             defer: false
         )
         nsWindow.title = title
-        nsWindow.isOpaque = false
+        nsWindow.isOpaque = true
         nsWindow.backgroundColor = .black
         nsWindow.level = .normal
         nsWindow.hasShadow = true
@@ -67,22 +69,69 @@ final class RemoteWindowView {
 
         videoLayer = CALayer()
         videoLayer.frame = contentView.bounds
+        videoLayer.contentsScale = nsWindow.backingScaleFactor
         videoLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
         videoLayer.contentsGravity = .resize
         contentView.layer?.addSublayer(videoLayer)
     }
+
+    private var pendingSurface: IOSurfaceRef?
+    private var pendingPixelBuffer: CVPixelBuffer?
+    private var updateScheduled = false
+
+    private var hasShownFirstFrame = false
 
     func updateFrame(_ pixelBuffer: CVPixelBuffer) {
         guard let surface = CVPixelBufferGetIOSurface(pixelBuffer) else { return }
         let ioSurface = unsafeBitCast(surface, to: IOSurfaceRef.self)
 
         if Thread.isMainThread {
+            updateContentsScale(pixelBuffer)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
             videoLayer.contents = ioSurface
+            CATransaction.commit()
+            showOnFirstFrame()
         } else {
-            DispatchQueue.main.async { [weak self] in
-                self?.videoLayer.contents = ioSurface
+            pendingSurface = ioSurface
+            pendingPixelBuffer = pixelBuffer
+            if !updateScheduled {
+                updateScheduled = true
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    self.updateScheduled = false
+                    if let surface = self.pendingSurface {
+                        if let pb = self.pendingPixelBuffer {
+                            self.updateContentsScale(pb)
+                        }
+                        CATransaction.begin()
+                        CATransaction.setDisableActions(true)
+                        self.videoLayer.contents = surface
+                        CATransaction.commit()
+                        self.pendingSurface = nil
+                        self.pendingPixelBuffer = nil
+                        self.showOnFirstFrame()
+                    }
+                }
             }
         }
+    }
+
+    private func updateContentsScale(_ pixelBuffer: CVPixelBuffer) {
+        let videoWidth = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+        let layerWidth = videoLayer.bounds.width
+        guard layerWidth > 0 else { return }
+        let scale = videoWidth / layerWidth
+        if abs(videoLayer.contentsScale - scale) > 0.01 {
+            videoLayer.contentsScale = scale
+        }
+    }
+
+    private func showOnFirstFrame() {
+        guard !hasShownFirstFrame else { return }
+        hasShownFirstFrame = true
+        nsWindow.makeKeyAndOrderFront(nil)
+        nsWindow.makeFirstResponder(nsWindow.contentView)
     }
 
     func updateTitle(_ title: String) {
@@ -113,8 +162,6 @@ final class RemoteWindowView {
     func show() {
         let doShow = { [weak self] in
             guard let self = self else { return }
-            self.nsWindow.makeKeyAndOrderFront(nil)
-            self.nsWindow.makeFirstResponder(self.nsWindow.contentView)
             let notifyResize: (Notification) -> Void = { [weak self] _ in
                 guard let self = self, let contentView = self.nsWindow.contentView else { return }
                 let size = contentView.bounds.size
@@ -129,6 +176,12 @@ final class RemoteWindowView {
             )
             self.fullscreenObserver = NotificationCenter.default.addObserver(
                 forName: NSWindow.didEnterFullScreenNotification,
+                object: self.nsWindow,
+                queue: .main,
+                using: notifyResize
+            )
+            self.exitFullscreenObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didExitFullScreenNotification,
                 object: self.nsWindow,
                 queue: .main,
                 using: notifyResize
@@ -159,7 +212,7 @@ final class RemoteWindowView {
     }
 
     deinit {
-        for observer in [resizeObserver, fullscreenObserver, screenChangeObserver].compactMap({ $0 }) {
+        for observer in [resizeObserver, fullscreenObserver, exitFullscreenObserver, screenChangeObserver].compactMap({ $0 }) {
             NotificationCenter.default.removeObserver(observer)
         }
     }

@@ -3,6 +3,9 @@ import CoreGraphics
 import VDICore
 
 final class InputHandler {
+    private var lastActivePID: pid_t?
+    private var pidCache: [String: pid_t] = [:]
+
     func handle(_ event: InputEvent, windowInfo: WindowInfo) {
         switch event.type {
         case .mouseDown, .mouseUp, .rightMouseDown, .rightMouseUp, .mouseMoved, .mouseDragged:
@@ -49,7 +52,6 @@ final class InputHandler {
         }
 
         guard let cgEvent = CGEvent(mouseEventSource: nil, mouseType: mouseType, mouseCursorPosition: point, mouseButton: mouseButton) else {
-            print("[InputHandler] Failed to create CGEvent for \(event.type)")
             return
         }
         cgEvent.flags = CGEventFlags(rawValue: event.modifiers)
@@ -59,16 +61,25 @@ final class InputHandler {
             cgEvent.setIntegerValueField(.mouseEventClickState, value: 1)
         }
 
+        let useGlobalPost = event.type == .mouseDown || event.type == .mouseUp ||
+                            event.type == .rightMouseDown || event.type == .rightMouseUp ||
+                            event.type == .mouseDragged
+
+        if let pid = pidForWindow(windowInfo) {
+            activateAppIfNeeded(pid)
+        }
         CGWarpMouseCursorPosition(point)
-        cgEvent.post(tap: .cghidEventTap)
+
+        if useGlobalPost {
+            cgEvent.post(tap: .cghidEventTap)
+        } else if let pid = pidForWindow(windowInfo) {
+            cgEvent.postToPid(pid)
+        } else {
+            cgEvent.post(tap: .cghidEventTap)
+        }
     }
 
     private func handleScrollEvent(_ event: InputEvent, windowInfo: WindowInfo) {
-        let bounds = windowInfo.bounds
-        let screenX = bounds.x + event.x * bounds.width
-        let screenY = bounds.y + event.y * bounds.height
-        let point = CGPoint(x: screenX, y: screenY)
-
         let dy = roundAwayFromZero(event.scrollDeltaY)
         let dx = roundAwayFromZero(event.scrollDeltaX)
 
@@ -78,7 +89,15 @@ final class InputHandler {
         cgEvent.setDoubleValueField(.scrollWheelEventPointDeltaAxis2, value: event.scrollDeltaX)
         cgEvent.flags = CGEventFlags(rawValue: event.modifiers)
 
-        CGWarpMouseCursorPosition(point)
+        if event.scrollIsContinuous {
+            cgEvent.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        }
+        cgEvent.setIntegerValueField(.scrollWheelEventScrollPhase, value: Int64(event.scrollPhase))
+        cgEvent.setIntegerValueField(.scrollWheelEventMomentumPhase, value: Int64(event.scrollMomentumPhase))
+
+        if let pid = pidForWindow(windowInfo) {
+            activateAppIfNeeded(pid)
+        }
         cgEvent.post(tap: .cghidEventTap)
     }
 
@@ -94,6 +113,7 @@ final class InputHandler {
         cgEvent.flags = CGEventFlags(rawValue: event.modifiers)
 
         if let pid = pidForWindow(windowInfo) {
+            activateAppIfNeeded(pid)
             cgEvent.postToPid(pid)
         } else {
             cgEvent.post(tap: .cghidEventTap)
@@ -106,16 +126,29 @@ final class InputHandler {
         cgEvent.flags = CGEventFlags(rawValue: event.modifiers)
 
         if let pid = pidForWindow(windowInfo) {
+            activateAppIfNeeded(pid)
             cgEvent.postToPid(pid)
         } else {
             cgEvent.post(tap: .cghidEventTap)
         }
     }
 
+    private func activateAppIfNeeded(_ pid: pid_t) {
+        guard pid != lastActivePID else { return }
+        lastActivePID = pid
+        if let app = NSRunningApplication(processIdentifier: pid) {
+            app.activate()
+        }
+    }
+
     private func pidForWindow(_ windowInfo: WindowInfo) -> pid_t? {
         if let bundleID = windowInfo.bundleID {
+            if let cached = pidCache[bundleID] {
+                return cached
+            }
             let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
             if let pid = apps.first?.processIdentifier {
+                pidCache[bundleID] = pid
                 return pid
             }
         }

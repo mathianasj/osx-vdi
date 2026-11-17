@@ -3,6 +3,8 @@ import IOKit.pwr_mgt
 import VDICore
 
 signal(SIGPIPE, SIG_IGN)
+setbuf(stdout, nil)
+setbuf(stderr, nil)
 
 var port: UInt16 = 9876
 
@@ -29,6 +31,19 @@ if result == kIOReturnSuccess {
 } else {
     print("Warning: Could not prevent screen lock")
 }
+
+let activityTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+activityTimer.schedule(deadline: .now(), repeating: 30)
+activityTimer.setEventHandler {
+    var activityID: IOPMAssertionID = 0
+    IOPMAssertionDeclareUserActivity(
+        "VDI Server active session" as CFString,
+        kIOPMUserActiveLocal,
+        &activityID
+    )
+}
+activityTimer.resume()
+print("User activity heartbeat started (every 30s)")
 
 var webPort: Int = 8080
 if let webPortIndex = args.firstIndex(of: "--web-port"), webPortIndex + 1 < args.count,
@@ -59,9 +74,17 @@ do {
     let server = try TCPServer(port: port)
 
     server.onNewConnection = { connection in
+        let remoteDesc = "\(connection.endpoint)"
+        print("New connection from \(remoteDesc) (\(sessions.count) existing)")
+
         let session = ServerSession(connection: connection, windowManager: windowManager)
         let id = ObjectIdentifier(session)
+
         sessions[id] = session
+        session.onDisconnect = {
+            sessions.removeValue(forKey: id)
+            print("Session removed (\(sessions.count) active)")
+        }
     }
 
     windowManager.onWindowCreated = { info in

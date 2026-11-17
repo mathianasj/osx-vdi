@@ -17,7 +17,8 @@ final class ServerSession {
         let encoder: VideoEncoder
         var info: WindowInfo
         var frameNumber: UInt32 = 0
-        var isSending = false
+        var framesInFlight: Int = 0
+        static let maxInFlight = 5
     }
 
     private let connection: NWConnection
@@ -33,9 +34,16 @@ final class ServerSession {
     private let clipboardMonitor = ClipboardMonitor()
     private var sendLatencies: [Double] = []
     private var bitrateTimer: DispatchSourceTimer?
+    private var bitrateAdaptationStart: CFAbsoluteTime = 0
     private let virtualDisplayManager = VirtualDisplayManager()
     private let virtualCamera = VirtualCameraProvider()
     private let virtualMicrophone = VirtualMicrophoneProvider()
+    private let menuBarReader = MenuBarReader()
+    private var menuTimer: DispatchSourceTimer?
+    private var lastMenuHash: [String: Int] = [:]
+
+    var onDisconnect: (() -> Void)?
+    var onAuthenticated: (() -> Void)?
 
     init(connection: NWConnection, windowManager: WindowManager) {
         self.connection = connection
@@ -66,9 +74,8 @@ final class ServerSession {
             print("[ServerSession] Mic IO started, requesting client microphone")
             self?.send(.requestClientMicrophone)
         }
-        virtualMicrophone.onIOStopped = { [weak self] in
-            print("[ServerSession] Mic IO stopped, stopping client microphone")
-            self?.send(.stopClientMicrophone)
+        virtualMicrophone.onIOStopped = {
+            print("[ServerSession] Mic IO stopped (client mic stays active)")
         }
 
         connection.stateUpdateHandler = { [weak self] state in
@@ -81,6 +88,12 @@ final class ServerSession {
 
         connection.start(queue: queue)
         receiveLoop()
+
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self = self, self.state == .waitingForHello else { return }
+            print("[ServerSession] No hello received after 5s, disconnecting stray connection")
+            self.disconnect()
+        }
     }
 
     private func receiveLoop() {
@@ -100,13 +113,21 @@ final class ServerSession {
         switch message {
         case .hello where state == .waitingForHello:
             state = .connected
+            onAuthenticated?()
+            onAuthenticated = nil
             send(.helloResponse(version: "1.0", serverName: Host.current().localizedName ?? "VDI Server"))
             sendScreenInfo()
             startCursorTracking()
             startClipboardMonitoring()
+            startMenuTracking()
             startBitrateAdaptation()
             virtualMicrophone.start()
             virtualCamera.start()
+            send(.requestClientMicrophone)
+            Task { await sendWindowList() }
+
+        case .hello where state == .connected:
+            print("[ServerSession] Refreshing window list for reconnected client")
             Task { await sendWindowList() }
 
         case .selectWindow(let windowID) where state == .connected || !streams.isEmpty:
@@ -134,6 +155,7 @@ final class ServerSession {
         case .inputEvent(let inputEvent):
             if let stream = streams[inputEvent.windowID] {
                 inputHandler.handle(inputEvent, windowInfo: stream.info)
+                switchAudioToWindow(inputEvent.windowID)
             } else {
                 print("[ServerSession] No stream for windowID \(inputEvent.windowID), available: \(Array(streams.keys))")
             }
@@ -164,6 +186,9 @@ final class ServerSession {
 
         case .clientMicrophoneStopped:
             print("[ServerSession] Client microphone stopped")
+
+        case .menuAction(let bundleID, let path):
+            handleMenuAction(bundleID: bundleID, path: path)
 
         default:
             break
@@ -234,6 +259,68 @@ final class ServerSession {
         clipboardMonitor.start()
     }
 
+    // MARK: - Menu Bar
+
+    private func startMenuTracking() {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 1, repeating: .seconds(2))
+        timer.setEventHandler { [weak self] in
+            self?.pollMenuBars()
+        }
+        timer.resume()
+        menuTimer = timer
+    }
+
+    private func stopMenuTracking() {
+        menuTimer?.cancel()
+        menuTimer = nil
+    }
+
+    private func pollMenuBars() {
+        var seen = Set<String>()
+        for (_, stream) in streams {
+            guard let bundleID = stream.info.bundleID, !seen.contains(bundleID) else { continue }
+            seen.insert(bundleID)
+
+            guard let pid = findPid(for: stream.info) else { continue }
+            guard let items = menuBarReader.readMenuBar(pid: pid) else { continue }
+
+            let hash = items.hashableDescription.hashValue
+            if lastMenuHash[bundleID] != hash {
+                lastMenuHash[bundleID] = hash
+                send(.menuBarUpdate(bundleID: bundleID, items: items))
+                print("[ServerSession] Menu bar updated for \(bundleID) (\(items.count) top-level items)")
+            }
+        }
+    }
+
+    private func sendMenuBar(for info: WindowInfo) {
+        guard let bundleID = info.bundleID, let pid = findPid(for: info) else { return }
+        guard let items = menuBarReader.readMenuBar(pid: pid) else { return }
+        lastMenuHash[bundleID] = items.hashableDescription.hashValue
+        send(.menuBarUpdate(bundleID: bundleID, items: items))
+        print("[ServerSession] Sent menu bar for \(bundleID) (\(items.count) top-level items)")
+    }
+
+    private func handleMenuAction(bundleID: String, path: [Int]) {
+        guard let stream = streams.values.first(where: { $0.info.bundleID == bundleID }),
+              let pid = findPid(for: stream.info) else {
+            print("[ServerSession] No stream found for menu action: \(bundleID)")
+            return
+        }
+
+        if menuBarReader.performAction(pid: pid, path: path) {
+            print("[ServerSession] Menu action performed: \(bundleID) path=\(path)")
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.queue.async {
+                    self?.pollMenuBars()
+                }
+            }
+        } else {
+            print("[ServerSession] Menu action failed: \(bundleID) path=\(path)")
+        }
+    }
+
     private func sendWindowList() async {
         do {
             let windows = try await windowManager.discoverWindows()
@@ -263,7 +350,7 @@ final class ServerSession {
 
             let refWindow = try await windowManager.findSCWindow(byID: windowID)
             let actualWindow = refWindow ?? scWindow
-            let scaleFactor = Int(NSScreen.main?.backingScaleFactor ?? 2.0)
+            let scaleFactor = scaleFactorForWindow(actualWindow.frame)
             let width = Int(actualWindow.frame.width) * scaleFactor
             let height = Int(actualWindow.frame.height) * scaleFactor
 
@@ -280,7 +367,12 @@ final class ServerSession {
                 )
             }
 
-            let capture = WindowCaptureSession(window: actualWindow, width: width, height: height)
+            let shouldCaptureAudio = queue.sync { activeAudioWindowID == nil }
+            let capture = WindowCaptureSession(window: actualWindow, width: width, height: height, audioEnabled: shouldCaptureAudio)
+            if shouldCaptureAudio {
+                queue.sync { activeAudioWindowID = windowID }
+                print("[ServerSession] Audio capture assigned to window \(windowID)")
+            }
 
             capture.onFrame = { [weak encoder] sampleBuffer in
                 encoder?.encode(sampleBuffer: sampleBuffer)
@@ -312,7 +404,6 @@ final class ServerSession {
                 windowLayer: actualWindow.windowLayer
             )
 
-            try await capture.start()
             let stream = WindowStream(capture: capture, encoder: encoder, info: info)
             let pointWidth = Int(scWindow.frame.width)
             let pointHeight = Int(scWindow.frame.height)
@@ -320,6 +411,9 @@ final class ServerSession {
                 self.streams[windowID] = stream
             }
             send(.streamStarted(windowID: windowID, width: pointWidth, height: pointHeight))
+            sendMenuBar(for: info)
+
+            try await capture.start()
         } catch {
             send(.error("Failed to start streaming: \(error.localizedDescription)"))
         }
@@ -333,7 +427,7 @@ final class ServerSession {
 
         do {
             guard let scWindow = try await windowManager.findSCWindow(byID: windowID) else { return }
-            let scaleFactor = Int(NSScreen.main?.backingScaleFactor ?? 2.0)
+            let scaleFactor = scaleFactorForWindow(scWindow.frame)
             let pixelWidth = Int(scWindow.frame.width) * scaleFactor
             let pixelHeight = Int(scWindow.frame.height) * scaleFactor
 
@@ -342,7 +436,8 @@ final class ServerSession {
                 self?.handleEncodedFrame(nalData: nalData, isKeyframe: isKeyframe, timestamp: pts, sps: sps, pps: pps, windowID: windowID)
             }
 
-            let capture = WindowCaptureSession(window: scWindow, width: pixelWidth, height: pixelHeight)
+            let isAudioWindow = queue.sync { activeAudioWindowID == windowID }
+            let capture = WindowCaptureSession(window: scWindow, width: pixelWidth, height: pixelHeight, audioEnabled: isAudioWindow)
             capture.onFrame = { [weak encoder] sampleBuffer in encoder?.encode(sampleBuffer: sampleBuffer) }
             capture.onIdleResume = { [weak encoder] in encoder?.forceKeyframe() }
             capture.onAudioSample = { [weak self] sampleBuffer in
@@ -355,7 +450,6 @@ final class ServerSession {
                 }
             }
 
-            try await capture.start()
             var updatedInfo = oldStream.info
             updatedInfo.bounds = CodableRect(cgRect: scWindow.frame)
             let stream = WindowStream(capture: capture, encoder: encoder, info: updatedInfo, frameNumber: oldStream.frameNumber)
@@ -364,6 +458,8 @@ final class ServerSession {
             let pointWidth = Int(scWindow.frame.width)
             let pointHeight = Int(scWindow.frame.height)
             send(.streamStarted(windowID: windowID, width: pointWidth, height: pointHeight))
+
+            try await capture.start()
             print("[ServerSession] Recaptured stream \(windowID): \(pixelWidth)x\(pixelHeight)")
         } catch {
             print("[ServerSession] Failed to recapture: \(error)")
@@ -374,7 +470,7 @@ final class ServerSession {
         let oldStream = queue.sync { streams[windowID] }
         guard let oldStream = oldStream else { return }
 
-        resizeServerWindow(windowInfo: oldStream.info, width: width, height: height)
+        resizeServerWindow(windowID: windowID, windowInfo: oldStream.info, width: width, height: height)
 
         try? await oldStream.capture.stop()
 
@@ -385,9 +481,9 @@ final class ServerSession {
 
             let actualWidth = Int(scWindow.frame.width)
             let actualHeight = Int(scWindow.frame.height)
-            print("[ServerSession] Requested: \(width)x\(height), actual window frame: \(actualWidth)x\(actualHeight)")
+            let scaleFactor = scaleFactorForWindow(scWindow.frame)
+            print("[ServerSession] Requested: \(width)x\(height), actual window frame: \(actualWidth)x\(actualHeight), scale: \(scaleFactor)x")
 
-            let scaleFactor = Int(NSScreen.main?.backingScaleFactor ?? 2.0)
             let pixelWidth = actualWidth * scaleFactor
             let pixelHeight = actualHeight * scaleFactor
 
@@ -403,7 +499,8 @@ final class ServerSession {
                 )
             }
 
-            let capture = WindowCaptureSession(window: scWindow, width: pixelWidth, height: pixelHeight)
+            let isAudioWindow = queue.sync { activeAudioWindowID == windowID }
+            let capture = WindowCaptureSession(window: scWindow, width: pixelWidth, height: pixelHeight, audioEnabled: isAudioWindow)
             capture.onFrame = { [weak encoder] sampleBuffer in
                 encoder?.encode(sampleBuffer: sampleBuffer)
             }
@@ -415,8 +512,6 @@ final class ServerSession {
                 self?.send(.error("Capture error for window \(windowID): \(error.localizedDescription)"))
             }
 
-            try await capture.start()
-
             var updatedInfo = oldStream.info
             updatedInfo.bounds = CodableRect(cgRect: scWindow.frame)
             let stream = WindowStream(capture: capture, encoder: encoder, info: updatedInfo, frameNumber: oldStream.frameNumber)
@@ -425,17 +520,39 @@ final class ServerSession {
             let pointWidth = Int(scWindow.frame.width)
             let pointHeight = Int(scWindow.frame.height)
             send(.streamStarted(windowID: windowID, width: pointWidth, height: pointHeight))
+
+            try await capture.start()
             print("[ServerSession] Resized stream \(windowID) to \(pixelWidth)x\(pixelHeight) (points: \(pointWidth)x\(pointHeight))")
         } catch {
             print("[ServerSession] Failed to restart stream: \(error)")
         }
     }
 
-    private func resizeServerWindow(windowInfo: WindowInfo, width: Int, height: Int) {
-        guard let pid = findPid(for: windowInfo) else {
+    private func resizeServerWindow(windowID: UInt32, windowInfo: WindowInfo, width: Int, height: Int) {
+        var currentPos: CGPoint?
+        var currentPid: pid_t?
+
+        if let windowList = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[CFString: Any]] {
+            for entry in windowList {
+                if let wid = entry[kCGWindowNumber] as? UInt32, wid == windowID,
+                   let ownerPID = entry[kCGWindowOwnerPID] as? pid_t {
+                    currentPid = ownerPID
+                    if let bounds = entry[kCGWindowBounds] as? NSDictionary,
+                       let rect = CGRect(dictionaryRepresentation: bounds) {
+                        currentPos = rect.origin
+                    }
+                    break
+                }
+            }
+        }
+
+        let pid = currentPid ?? findPid(for: windowInfo)
+        guard let pid = pid else {
             print("[ServerSession] Could not find PID for window resize")
             return
         }
+
+        let matchPos = currentPos ?? CGPoint(x: windowInfo.bounds.x, y: windowInfo.bounds.y)
 
         let appElement = AXUIElementCreateApplication(pid)
         var windowsRef: CFTypeRef?
@@ -451,16 +568,26 @@ final class ServerSession {
             var pos = CGPoint.zero
             AXValueGetValue(posRef as! AXValue, .cgPoint, &pos)
 
-            let bounds = windowInfo.bounds
-            if abs(pos.x - bounds.x) < 5 && abs(pos.y - bounds.y) < 5 {
+            if abs(pos.x - matchPos.x) < 5 && abs(pos.y - matchPos.y) < 5 {
                 var newSize = CGSize(width: CGFloat(width), height: CGFloat(height))
                 guard let sizeValue = AXValueCreate(.cgSize, &newSize) else { continue }
                 let result = AXUIElementSetAttributeValue(axWindow, kAXSizeAttribute as CFString, sizeValue)
-                print("[ServerSession] AX resize result: \(result == .success ? "success" : "failed (\(result.rawValue))")")
+                print("[ServerSession] AX resize to \(width)x\(height): \(result == .success ? "success" : "failed (\(result.rawValue))")")
                 return
             }
         }
-        print("[ServerSession] Could not match AX window by position")
+        print("[ServerSession] Could not match AX window by position (looking for \(matchPos))")
+    }
+
+    private func scaleFactorForWindow(_ frame: CGRect) -> Int {
+        for screen in NSScreen.screens {
+            guard let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else { continue }
+            let displayBounds = CGDisplayBounds(displayID)
+            if displayBounds.contains(CGPoint(x: frame.midX, y: frame.midY)) {
+                return max(1, Int(screen.backingScaleFactor))
+            }
+        }
+        return Int(NSScreen.main?.backingScaleFactor ?? 2.0)
     }
 
     private func pidForApp(_ app: SCRunningApplication?) -> pid_t? {
@@ -488,6 +615,18 @@ final class ServerSession {
         guard let stream = stream else { return }
         try? await stream.capture.stop()
         send(.streamStopped(windowID: windowID))
+
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            if self.activeAudioWindowID == windowID {
+                self.activeAudioWindowID = nil
+                if let nextID = self.streams.keys.first {
+                    self.activeAudioWindowID = nextID
+                    self.streams[nextID]?.capture.setAudioEnabled(true)
+                    print("[ServerSession] Audio reassigned to window \(nextID)")
+                }
+            }
+        }
     }
 
     private func stopAllStreams() async {
@@ -497,25 +636,95 @@ final class ServerSession {
         }
     }
 
+    private var activeAudioWindowID: UInt32?
+    private var lastAudioSwitchTime: UInt64 = 0
+    private var audioFrameCount: UInt64 = 0
+
+    private func switchAudioToWindow(_ windowID: UInt32) {
+        guard activeAudioWindowID != windowID else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now - lastAudioSwitchTime > 500_000_000 else { return }
+        lastAudioSwitchTime = now
+
+        if let oldID = activeAudioWindowID, let oldStream = streams[oldID] {
+            oldStream.capture.setAudioEnabled(false)
+        }
+        activeAudioWindowID = windowID
+        if let newStream = streams[windowID] {
+            newStream.capture.setAudioEnabled(true)
+            print("[ServerSession] Audio switched to window \(windowID)")
+        }
+    }
+
     private func handleAudioSample(_ sampleBuffer: CMSampleBuffer, windowID: UInt32) {
         guard state != .disconnected else { return }
 
-        guard let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-
-        var totalLength = 0
-        var dataPointer: UnsafeMutablePointer<Int8>?
-        CMBlockBufferGetDataPointer(dataBuffer, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &totalLength, dataPointerOut: &dataPointer)
-        guard let ptr = dataPointer, totalLength > 0 else { return }
-
-        let pcmData = Data(bytes: ptr, count: totalLength)
 
         var sampleRate: UInt32 = 48000
         var channels: UInt16 = 2
+        var isInterleaved = true
         if let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
            let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) {
             sampleRate = UInt32(asbd.pointee.mSampleRate)
             channels = UInt16(asbd.pointee.mChannelsPerFrame)
+            isInterleaved = asbd.pointee.mFormatFlags & kAudioFormatFlagIsNonInterleaved == 0
+        }
+
+        let chCount = Int(channels)
+        var ablSize: Int = 0
+        var blockBuffer: CMBlockBuffer?
+
+        CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: &ablSize,
+            bufferListOut: nil,
+            bufferListSize: 0,
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: 0,
+            blockBufferOut: nil
+        )
+        guard ablSize > 0 else { return }
+
+        let ablRaw = UnsafeMutableRawPointer.allocate(byteCount: ablSize, alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { ablRaw.deallocate() }
+        let ablMemory = ablRaw.bindMemory(to: AudioBufferList.self, capacity: 1)
+
+        let status2 = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: ablMemory,
+            bufferListSize: ablSize,
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: &blockBuffer
+        )
+        guard status2 == noErr else { return }
+
+        let ablPtr = UnsafeMutableAudioBufferListPointer(ablMemory)
+        let frameCount = Int(CMSampleBufferGetNumSamples(sampleBuffer))
+
+        var pcmData: Data
+        if isInterleaved || ablPtr.count == 1 {
+            guard let src = ablPtr[0].mData else { return }
+            pcmData = Data(bytes: src, count: Int(ablPtr[0].mDataByteSize))
+        } else {
+            let bytesPerChannel = frameCount * 4
+            pcmData = Data(count: bytesPerChannel * chCount)
+            pcmData.withUnsafeMutableBytes { dest in
+                let destPtr = dest.baseAddress!.assumingMemoryBound(to: UInt8.self)
+                for ch in 0..<min(chCount, ablPtr.count) {
+                    guard let src = ablPtr[ch].mData else { continue }
+                    memcpy(destPtr + ch * bytesPerChannel, src, min(Int(ablPtr[ch].mDataByteSize), bytesPerChannel))
+                }
+            }
+        }
+
+        audioFrameCount += 1
+        if audioFrameCount == 1 || audioFrameCount % 500 == 0 {
+            print("[ServerSession] Audio frame #\(audioFrameCount): \(sampleRate)Hz \(channels)ch \(pcmData.count)B interleaved=\(isInterleaved) bufs=\(ablPtr.count) frames=\(frameCount)")
         }
 
         let header = AudioFrameHeader(
@@ -535,7 +744,7 @@ final class ServerSession {
             guard let self = self, self.state != .disconnected else { return }
             guard var stream = self.streams[windowID] else { return }
 
-            if stream.isSending && !isKeyframe {
+            if stream.framesInFlight >= WindowStream.maxInFlight && !isKeyframe {
                 stream.encoder.forceKeyframe()
                 return
             }
@@ -550,7 +759,7 @@ final class ServerSession {
                 ppsSize: UInt16(pps?.count ?? 0)
             )
             stream.frameNumber += 1
-            stream.isSending = true
+            stream.framesInFlight += 1
             self.streams[windowID] = stream
 
             let data = MessageCodec.encode(videoHeader: header, sps: sps, pps: pps, payload: nalData)
@@ -558,7 +767,9 @@ final class ServerSession {
 
             self.connection.send(content: data, completion: .contentProcessed { [weak self] _ in
                 self?.queue.async {
-                    self?.streams[windowID]?.isSending = false
+                    if let inFlight = self?.streams[windowID]?.framesInFlight, inFlight > 0 {
+                        self?.streams[windowID]?.framesInFlight = inFlight - 1
+                    }
                     let latency = CFAbsoluteTimeGetCurrent() - sendStart
                     self?.recordSendLatency(latency)
                 }
@@ -574,6 +785,7 @@ final class ServerSession {
     }
 
     private func startBitrateAdaptation() {
+        bitrateAdaptationStart = CFAbsoluteTimeGetCurrent()
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 2, repeating: .seconds(2))
         timer.setEventHandler { [weak self] in
@@ -591,8 +803,13 @@ final class ServerSession {
     private func adaptBitrate() {
         guard !sendLatencies.isEmpty else { return }
 
+        let elapsed = CFAbsoluteTimeGetCurrent() - bitrateAdaptationStart
+        if elapsed < 5.0 {
+            sendLatencies.removeAll()
+            return
+        }
+
         let avgLatency = sendLatencies.reduce(0, +) / Double(sendLatencies.count)
-        let levels = VideoEncoder.BitrateLevel.allCases
 
         let targetLevel: VideoEncoder.BitrateLevel
         if avgLatency < 0.005 {
@@ -601,22 +818,20 @@ final class ServerSession {
             targetLevel = .excellent
         } else if avgLatency < 0.030 {
             targetLevel = .good
-        } else if avgLatency < 0.060 {
-            targetLevel = .fair
         } else {
-            targetLevel = .poor
+            targetLevel = .fair
         }
 
         for (_, stream) in streams {
             let current = stream.encoder.currentBitrate
             let target = targetLevel.rawValue
 
-            if target < current {
+            if target != current {
+                print("[Bitrate] \(current/1_000_000)Mbps → \(target/1_000_000)Mbps (latency=\(String(format: "%.1f", avgLatency * 1000))ms)")
                 stream.encoder.setBitrate(target)
-            } else if target > current {
-                let currentIdx = levels.firstIndex { $0.rawValue == current } ?? 0
-                let nextIdx = min(currentIdx + 1, levels.count - 1)
-                stream.encoder.setBitrate(levels[nextIdx].rawValue)
+                if target > current {
+                    stream.encoder.forceKeyframe()
+                }
             }
         }
     }
@@ -630,8 +845,10 @@ final class ServerSession {
         queue.async { [weak self] in
             guard let self = self, self.state == .connected else { return }
             let streamingBundleIDs = Set(self.streams.values.compactMap { $0.info.bundleID })
+            print("[ServerSession] windowCreated: \(info.windowID) bundleID=\(info.bundleID ?? "nil") layer=\(info.windowLayer) title=\(info.title ?? "nil") size=\(Int(info.bounds.width))x\(Int(info.bounds.height))")
             if let bundleID = info.bundleID, streamingBundleIDs.contains(bundleID),
                info.bounds.width >= 200, info.bounds.height >= 200,
+               info.windowLayer == 0,
                info.title != nil, info.title != info.appName {
                 print("[ServerSession] Auto-streaming new window \(info.windowID) from \(bundleID) (\(Int(info.bounds.width))x\(Int(info.bounds.height)))")
                 self.send(.windowCreated(info))
@@ -669,11 +886,20 @@ final class ServerSession {
         state = .disconnected
         stopCursorTracking()
         stopBitrateAdaptation()
+        stopMenuTracking()
         clipboardMonitor.stop()
         virtualDisplayManager.tearDown()
         virtualCamera.stop()
         virtualMicrophone.stop()
-        Task { await stopAllStreams() }
+        let allStreams = streams
+        streams.removeAll()
+        activeAudioWindowID = nil
+        for (_, stream) in allStreams {
+            Task { try? await stream.capture.stop() }
+        }
         connection.cancel()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.onDisconnect?()
+        }
     }
 }

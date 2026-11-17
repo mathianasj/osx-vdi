@@ -40,6 +40,9 @@ final class InputForwarder {
 
     private func handleEvent(_ nsEvent: NSEvent) {
         guard let window = nsEvent.window, window === windowView.nsWindow else { return }
+        if nsEvent.type == .leftMouseDown {
+            print("[InputForwarder] mouseDown on windowID=\(windowID) title=\(windowView.nsWindow.title)")
+        }
 
         if nsEvent.type == .leftMouseDown || nsEvent.type == .leftMouseUp ||
            nsEvent.type == .leftMouseDragged || nsEvent.type == .rightMouseDown ||
@@ -73,8 +76,12 @@ final class InputForwarder {
                 type: .scrollWheel,
                 x: nx,
                 y: ny,
+                modifiers: UInt64(nsEvent.modifierFlags.rawValue),
                 scrollDeltaX: deltaX,
-                scrollDeltaY: deltaY
+                scrollDeltaY: deltaY,
+                scrollIsContinuous: nsEvent.hasPreciseScrollingDeltas,
+                scrollPhase: nsEvent.phase.rawValue,
+                scrollMomentumPhase: nsEvent.momentumPhase.rawValue
             )
 
         case .keyDown, .keyUp:

@@ -6,7 +6,7 @@ import VDICore
 
 final class ConnectionManager {
     private struct WindowSession {
-        let decoder: VideoDecoder
+        var decoder: VideoDecoder
         var view: RemoteWindowView?
         var forwarder: InputForwarder?
         var lastFrameNumber: UInt32 = 0
@@ -14,9 +14,9 @@ final class ConnectionManager {
         var waitingForKeyframe = false
     }
 
-    private let host: String
-    private let port: UInt16
-    private let targetBundleID: String?
+    let host: String
+    let port: UInt16
+    private var targetBundleIDs: Set<String>
     private let client: TCPClient
     private let streamDecoder = StreamDecoder()
     private var serverName: String?
@@ -24,16 +24,31 @@ final class ConnectionManager {
     private var windowSessions: [UInt32: WindowSession] = [:]
     private let layoutManager = WindowLayoutManager()
     private let clipboardMonitor = ClipboardMonitor()
-    private let audioPlayer = AudioPlayer()
+    private let voiceIO = VoiceIOManager()
     private let clientMedia = ClientMediaManager()
+    private let remoteMenu = RemoteMenuManager()
+    let deviceManager = DeviceManager.shared
 
     init(host: String, port: UInt16, targetBundleID: String? = nil) {
         self.host = host
         self.port = port
-        self.targetBundleID = targetBundleID
+        self.targetBundleIDs = targetBundleID.map { [$0] } ?? []
         self.client = TCPClient(host: host, port: port)
 
         setupHandlers()
+
+        DeviceManager.shared.onDeviceSelectionChanged = { [weak self] in
+            guard let self = self else { return }
+            let outputID = DeviceManager.shared.currentAudioOutputID()
+            self.voiceIO.setOutputDevice(outputID)
+
+            if let mic = DeviceManager.shared.currentAudioInput() {
+                let inputID = DeviceManager.shared.audioDeviceID(for: mic)
+                self.voiceIO.setInputDevice(inputID)
+            } else {
+                self.voiceIO.setInputDevice(nil)
+            }
+        }
     }
 
     func connect() {
@@ -48,10 +63,16 @@ final class ConnectionManager {
                 print("Connected to server")
                 self?.sendControl(.hello(version: "1.0"))
                 self?.startClipboardMonitoring()
+                let outputID = DeviceManager.shared.currentAudioOutputID()
+                self?.voiceIO.setOutputDevice(outputID)
             case .failed(let error):
                 print("Connection failed: \(error)")
+                self?.voiceIO.stop()
+                self?.clientMedia.stopAll()
             case .cancelled:
                 print("Disconnected from server")
+                self?.voiceIO.stop()
+                self?.clientMedia.stopAll()
             default:
                 break
             }
@@ -70,14 +91,10 @@ final class ConnectionManager {
         }
 
         streamDecoder.onAudioFrame = { [weak self] header, data in
-            self?.audioPlayer.play(header: header, data: data)
+            self?.voiceIO.play(header: header, data: data)
         }
 
         clientMedia.onVideoData = { [weak self] data in
-            self?.client.send(data)
-        }
-
-        clientMedia.onAudioData = { [weak self] data in
             self?.client.send(data)
         }
 
@@ -85,16 +102,24 @@ final class ConnectionManager {
             self?.sendControl(.clientCameraStarted(width: width, height: height))
         }
 
-        clientMedia.onMicrophoneStarted = { [weak self] sampleRate, channels in
-            self?.sendControl(.clientMicrophoneStarted(sampleRate: sampleRate, channels: channels))
-        }
-
         clientMedia.onCameraStopped = { [weak self] in
             self?.sendControl(.clientCameraStopped)
         }
 
-        clientMedia.onMicrophoneStopped = { [weak self] in
-            self?.sendControl(.clientMicrophoneStopped)
+        voiceIO.onMicSample = { [weak self] pcmData, sampleRate, channels in
+            let header = AudioFrameHeader(
+                windowID: 0,
+                timestamp: 0,
+                sampleRate: sampleRate,
+                channels: channels,
+                payloadSize: UInt32(pcmData.count)
+            )
+            let data = MessageCodec.encode(clientAudioHeader: header, payload: pcmData)
+            self?.client.send(data)
+        }
+
+        remoteMenu.onMenuAction = { [weak self] bundleID, path in
+            self?.sendControl(.menuAction(bundleID: bundleID, path: path))
         }
     }
 
@@ -118,17 +143,19 @@ final class ConnectionManager {
                 print("  [\(i + 1)] \(app) — \(title) (\(Int(w.bounds.width))x\(Int(w.bounds.height)))")
             }
 
-            if let bundleID = targetBundleID {
-                let matching = windows.filter { $0.bundleID == bundleID }
-                if matching.isEmpty {
-                    print("No windows found for \(bundleID), retrying in 2s...")
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 2) { [weak self] in
-                        self?.sendControl(.hello(version: "1.0"))
-                    }
-                } else {
-                    print("Auto-selecting \(matching.count) window(s) for \(bundleID)")
-                    for window in matching {
-                        sendControl(.selectWindow(windowID: window.windowID))
+            if !targetBundleIDs.isEmpty {
+                for bundleID in targetBundleIDs {
+                    let matching = windows.filter { $0.bundleID == bundleID }
+                    if matching.isEmpty {
+                        print("No windows found for \(bundleID), retrying in 2s...")
+                        DispatchQueue.global().asyncAfter(deadline: .now() + 2) { [weak self] in
+                            self?.sendControl(.hello(version: "1.0"))
+                        }
+                    } else {
+                        print("Auto-selecting \(matching.count) window(s) for \(bundleID)")
+                        for window in matching {
+                            sendControl(.selectWindow(windowID: window.windowID))
+                        }
                     }
                 }
             } else {
@@ -141,7 +168,12 @@ final class ConnectionManager {
         case .streamStarted(let windowID, let width, let height):
             print("Stream started: window \(windowID) (\(width)x\(height))")
 
-            if windowSessions[windowID]?.view != nil {
+            if var existing = windowSessions[windowID], existing.view != nil {
+                existing.hasReceivedFrame = false
+                existing.waitingForKeyframe = true
+                existing.lastFrameNumber = 0
+                windowSessions[windowID] = existing
+                sendControl(.requestKeyframe(windowID: windowID))
                 return
             }
 
@@ -176,6 +208,23 @@ final class ConnectionManager {
                 }
                 forwarder.start()
 
+                NotificationCenter.default.addObserver(
+                    forName: NSWindow.didBecomeKeyNotification,
+                    object: view.nsWindow,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.remoteMenu.activateMenu(forBundleID: bundleID)
+                }
+                NotificationCenter.default.addObserver(
+                    forName: NSWindow.didResignKeyNotification,
+                    object: view.nsWindow,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.remoteMenu.deactivateMenu()
+                }
+
+                self.remoteMenu.activateMenu(forBundleID: bundleID)
+
                 session.view = view
                 session.forwarder = forwarder
                 self.windowSessions[windowID] = session
@@ -191,6 +240,13 @@ final class ConnectionManager {
         case .windowCreated(let info):
             if windowList.firstIndex(where: { $0.windowID == info.windowID }) == nil {
                 windowList.append(info)
+            }
+            if let bundleID = info.bundleID, targetBundleIDs.contains(bundleID),
+               windowSessions[info.windowID] == nil,
+               info.bounds.width >= 400, info.bounds.height >= 300,
+               info.title != nil, info.title != info.appName {
+                print("Auto-selecting new window for \(bundleID): \(info.title ?? "Untitled")")
+                sendControl(.selectWindow(windowID: info.windowID))
             }
 
         case .windowDestroyed(let windowID):
@@ -210,19 +266,32 @@ final class ConnectionManager {
         case .clipboardUpdate(let type, let data):
             clipboardMonitor.applyRemoteClipboard(type: type, data: data)
 
+        case .menuBarUpdate(let bundleID, let items):
+            DispatchQueue.main.async { [weak self] in
+                self?.remoteMenu.updateMenu(bundleID: bundleID, items: items)
+            }
+
         case .requestClientCamera(let width, let height):
             print("Server requested camera: \(width)x\(height)")
-            clientMedia.startCamera(width: width, height: height)
+            clientMedia.startCamera(width: width, height: height, device: DeviceManager.shared.currentCamera())
 
         case .requestClientMicrophone:
             print("Server requested microphone")
-            clientMedia.startMicrophone()
+            let inputID: AudioDeviceID?
+            if let mic = DeviceManager.shared.selectedAudioInput {
+                inputID = DeviceManager.shared.audioDeviceID(for: mic)
+            } else {
+                inputID = nil
+            }
+            voiceIO.startMicCapture(inputDeviceID: inputID)
+            sendControl(.clientMicrophoneStarted(sampleRate: 48000, channels: 1))
 
         case .stopClientCamera:
             clientMedia.stopCamera()
 
         case .stopClientMicrophone:
-            clientMedia.stopMicrophone()
+            voiceIO.stopMicCapture()
+            sendControl(.clientMicrophoneStopped)
 
         case .error(let message):
             print("Server error: \(message)")
@@ -232,13 +301,92 @@ final class ConnectionManager {
         }
     }
 
+    // MARK: - Video Stats
+    private var videoStatsFile: FileHandle?
+    private var frameTimestamps: [UInt64] = []
+    private var totalFramesReceived: Int = 0
+    private var totalFramesDecoded: Int = 0
+    private var totalFramesDropped: Int = 0
+    private var totalKeyframes: Int = 0
+    private var lastFrameDisplayTime: UInt64 = 0
+    private var maxInterFrameMs: Double = 0
+    private var totalDecodeLatencyNs: UInt64 = 0
+    private var statsStartTime: UInt64 = 0
+    private var lastStatsReport: UInt64 = 0
+    private var frameSizes: [Int] = []
+
+    private func initVideoStats() {
+        if videoStatsFile != nil { return }
+        let path = "/tmp/vdi-video-stats.log"
+        FileManager.default.createFile(atPath: path, contents: nil)
+        videoStatsFile = FileHandle(forWritingAtPath: path)
+        statsStartTime = DispatchTime.now().uptimeNanoseconds
+        lastStatsReport = statsStartTime
+        writeVideoLog("=== VDI Video Stats ===")
+    }
+
+    private func writeVideoLog(_ line: String) {
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - statsStartTime) / 1_000_000_000.0
+        let msg = String(format: "[%8.3f] %@\n", elapsed, line)
+        videoStatsFile?.write(msg.data(using: .utf8)!)
+    }
+
+    private func reportVideoStats() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now - lastStatsReport > 2_000_000_000 else { return }
+        lastStatsReport = now
+
+        let elapsed = Double(now - statsStartTime) / 1_000_000_000.0
+        let fps = Double(totalFramesReceived) / elapsed
+
+        var avgInterFrame: Double = 0
+        var jitter: Double = 0
+        if frameTimestamps.count > 1 {
+            var intervals: [Double] = []
+            for i in 1..<frameTimestamps.count {
+                intervals.append(Double(frameTimestamps[i] - frameTimestamps[i-1]) / 1_000_000.0)
+            }
+            avgInterFrame = intervals.reduce(0, +) / Double(intervals.count)
+            let variance = intervals.map { ($0 - avgInterFrame) * ($0 - avgInterFrame) }.reduce(0, +) / Double(intervals.count)
+            jitter = sqrt(variance)
+        }
+
+        let avgSize = frameSizes.isEmpty ? 0 : frameSizes.reduce(0, +) / frameSizes.count
+        let avgDecodeMs = totalFramesDecoded > 0 ? Double(totalDecodeLatencyNs) / Double(totalFramesDecoded) / 1_000_000.0 : 0
+
+        writeVideoLog(String(format: "STATS: fps=%.1f recv=%d decoded=%d dropped=%d keyframes=%d", fps, totalFramesReceived, totalFramesDecoded, totalFramesDropped, totalKeyframes))
+        writeVideoLog(String(format: "  timing: avgInterval=%.1fms jitter=%.1fms maxGap=%.1fms", avgInterFrame, jitter, maxInterFrameMs))
+        writeVideoLog(String(format: "  decode: avgLatency=%.1fms avgSize=%dB", avgDecodeMs, avgSize))
+
+        frameTimestamps.removeAll(keepingCapacity: true)
+        frameSizes.removeAll(keepingCapacity: true)
+        maxInterFrameMs = 0
+    }
+
     private func handleVideoFrame(header: VideoFrameHeader, data: Data) {
+        initVideoStats()
+
+        let receiveTime = DispatchTime.now().uptimeNanoseconds
+        totalFramesReceived += 1
+        frameTimestamps.append(receiveTime)
+        frameSizes.append(data.count)
+
+        if header.isKeyframe { totalKeyframes += 1 }
+
+        if lastFrameDisplayTime > 0 {
+            let gapMs = Double(receiveTime - lastFrameDisplayTime) / 1_000_000.0
+            if gapMs > maxInterFrameMs { maxInterFrameMs = gapMs }
+        }
+        lastFrameDisplayTime = receiveTime
+
         guard var session = windowSessions[header.windowID] else { return }
 
         if session.hasReceivedFrame {
             let expected = session.lastFrameNumber &+ 1
-            if header.frameNumber != expected {
-                print("Frame loss detected: expected \(expected), got \(header.frameNumber)")
+            if header.frameNumber != expected && header.frameNumber > session.lastFrameNumber {
+                let dropped = Int(header.frameNumber - session.lastFrameNumber - 1)
+                totalFramesDropped += dropped
+                writeVideoLog("FRAMEDROP: expected=\(expected) got=\(header.frameNumber) dropped=\(dropped)")
                 session.waitingForKeyframe = true
                 windowSessions[header.windowID] = session
                 sendControl(.requestKeyframe(windowID: header.windowID))
@@ -257,6 +405,10 @@ final class ConnectionManager {
         windowSessions[header.windowID] = session
 
         session.decoder.decode(frameHeader: header, frameData: data)
+        totalFramesDecoded += 1
+        totalDecodeLatencyNs += (DispatchTime.now().uptimeNanoseconds - receiveTime)
+
+        reportVideoStats()
     }
 
     private func sendControl(_ message: ControlMessage) {
@@ -305,6 +457,19 @@ final class ConnectionManager {
         clipboardMonitor.start()
     }
 
+    func addTargetBundleID(_ bundleID: String) {
+        targetBundleIDs.insert(bundleID)
+        let matching = windowList.filter { $0.bundleID == bundleID && windowSessions[$0.windowID] == nil }
+        if matching.isEmpty {
+            print("No windows found yet for \(bundleID), will auto-select when available")
+        } else {
+            print("Selecting \(matching.count) window(s) for \(bundleID)")
+            for window in matching {
+                sendControl(.selectWindow(windowID: window.windowID))
+            }
+        }
+    }
+
     func selectWindow(at index: Int) {
         guard index >= 0, index < windowList.count else { return }
         sendControl(.selectWindow(windowID: windowList[index].windowID))
@@ -312,7 +477,7 @@ final class ConnectionManager {
 
     func disconnect() {
         clipboardMonitor.stop()
-        audioPlayer.stop()
+        voiceIO.stop()
         clientMedia.stopAll()
         for (_, session) in windowSessions {
             session.forwarder?.stop()

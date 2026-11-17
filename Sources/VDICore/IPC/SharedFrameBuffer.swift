@@ -30,15 +30,32 @@ public final class SharedFrameBuffer {
     }
 
     public func create() -> Bool {
-        vdi_shm_unlink(shmName)
+        fd = vdi_shm_open(shmName, O_RDWR, 0)
+        if fd >= 0 {
+            mappedMemory = mmap(nil, totalSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
+            if mappedMemory != MAP_FAILED && mappedMemory != nil {
+                let mem = mappedMemory!
+                mem.storeBytes(of: UInt64(0), toByteOffset: 0, as: UInt64.self)
+                memset(mem + 12, 0, Header.size - 12)
+                memset(mem + Header.size, 0, totalSize - Header.size)
+                print("[SharedFrameBuffer] Reopened existing: \(shmName) (\(totalSize) bytes)")
+                return true
+            }
+            Darwin.close(fd)
+            fd = -1
+            mappedMemory = nil
+        }
+
         fd = vdi_shm_open(shmName, O_CREAT | O_RDWR, 0o666)
         guard fd >= 0 else {
-            print("[SharedFrameBuffer] Failed to create shm: \(shmName) (errno=\(errno))")
+            let err = errno
+            print("[SharedFrameBuffer] Failed to create shm: \(shmName) (errno=\(err): \(String(cString: strerror(err))))")
             return false
         }
 
         guard ftruncate(fd, off_t(totalSize)) == 0 else {
-            print("[SharedFrameBuffer] Failed to set size")
+            let err = errno
+            print("[SharedFrameBuffer] Failed to set size: \(totalSize) (errno=\(err): \(String(cString: strerror(err))))")
             Darwin.close(fd)
             fd = -1
             return false
@@ -53,7 +70,10 @@ public final class SharedFrameBuffer {
             return false
         }
 
-        memset(mappedMemory!, 0, totalSize)
+        let mem = mappedMemory!
+        mem.storeBytes(of: UInt64(0), toByteOffset: 0, as: UInt64.self)
+        memset(mem + 12, 0, Header.size - 12)
+        memset(mem + Header.size, 0, totalSize - Header.size)
         print("[SharedFrameBuffer] Created: \(shmName) (\(totalSize) bytes)")
         return true
     }
@@ -157,7 +177,6 @@ public final class SharedFrameBuffer {
             Darwin.close(fd)
             fd = -1
         }
-        vdi_shm_unlink(shmName)
     }
 
     deinit {
