@@ -39,7 +39,7 @@ final class VoiceIOManager {
     fileprivate var vpioJitterBuffer: JitterBuffer?
 
     private static let micLogPath = "/tmp/vdi-mic-client.log"
-    private static var micLogFile: FileHandle? = {
+    fileprivate static var micLogFile: FileHandle? = {
         FileManager.default.createFile(atPath: micLogPath, contents: Data())
         let fh = FileHandle(forWritingAtPath: micLogPath)
         fh?.truncateFile(atOffset: 0)
@@ -147,15 +147,37 @@ final class VoiceIOManager {
 
         micLog("startMicCapture: inputDevice=\(inputDeviceID.map { String($0) } ?? "default")")
 
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            beginMicCapture()
+        case .notDetermined:
+            micLog("Mic permission: not determined — requesting")
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+                guard let self = self, self.micCaptureActive else { return }
+                if granted {
+                    self.micLog("Mic permission granted")
+                    self.beginMicCapture()
+                } else {
+                    self.micLog("Mic permission denied by user")
+                }
+            }
+        case .denied:
+            micLog("Mic permission: DENIED — open System Settings > Privacy > Microphone")
+        case .restricted:
+            micLog("Mic permission: restricted")
+        @unknown default:
+            beginMicCapture()
+        }
+    }
+
+    private func beginMicCapture() {
         let sr = configuredSampleRate > 0 ? configuredSampleRate : 48000
         let ch = configuredChannels > 0 ? configuredChannels : 2
 
-        if startVPIO(sampleRate: sr, channels: ch) {
-            micLog("VPIO active — echo cancellation enabled (engine handles playback)")
-        } else {
-            micLog("VPIO failed — falling back to AVCaptureSession mic (no echo cancellation)")
-            startMicCaptureSession()
-        }
+        // AVCaptureSession for mic capture (no echo cancellation).
+        // VPIO renders silence on MacBook Pro — Apple aggregate device bug.
+        micLog("Starting AVCaptureSession mic (VPIO disabled — renders silence on this hardware)")
+        startMicCaptureSession()
     }
 
     func stopMicCapture() {
@@ -237,17 +259,10 @@ final class VoiceIOManager {
             return false
         }
 
-        // VPIO creates an aggregate device internally.
-        // Set the output device — VPIO will use the default input mic.
-        if let deviceID = outputDeviceID {
-            var devID = deviceID
-            status = AudioUnitSetProperty(au, kAudioOutputUnitProperty_CurrentDevice,
-                                          kAudioUnitScope_Global, 0,
-                                          &devID, UInt32(MemoryLayout<AudioDeviceID>.size))
-            if status != noErr {
-                micLog("VPIO: Set output device \(deviceID) failed: \(status) — using default")
-            }
-        }
+        // Don't set kAudioOutputUnitProperty_CurrentDevice — let VPIO use
+        // system defaults for its aggregate device. Setting an output-only device
+        // can prevent VPIO from attaching the default input mic.
+        // The AEC reference is fed via the bus 0 render callback regardless.
 
         // Use Float32 mono for the VPIO processing path (most compatible)
         var streamDesc = AudioStreamBasicDescription(
@@ -631,9 +646,26 @@ private func vpioInputCallback(
     guard status == noErr else { return status }
 
     let floatPtr = rawBuffer.assumingMemoryBound(to: Float.self)
+    let frameCountInt = Int(inNumberFrames)
+    var maxVal: Float = 0
+    for i in 0..<frameCountInt {
+        let v = abs(floatPtr[i])
+        if v > maxVal { maxVal = v }
+    }
+
+    struct VPIOInputStats {
+        static var count: UInt64 = 0
+    }
+    VPIOInputStats.count += 1
+    if VPIOInputStats.count <= 5 || VPIOInputStats.count % 500 == 0 {
+        let line = "[VoiceIO] VPIO input #\(VPIOInputStats.count): \(inNumberFrames) frames, max=\(String(format: "%.6f", maxVal))\n"
+        if let data = line.data(using: .utf8) {
+            VoiceIOManager.micLogFile?.write(data)
+        }
+    }
+
     let monoData = Data(bytes: floatPtr, count: bufferSize)
 
-    // We're on a real-time thread — dispatch the callback
     let sampleRate = mgr.configuredSampleRate
     DispatchQueue.global(qos: .userInteractive).async {
         mgr.onMicSample?(monoData, UInt32(sampleRate), 1)

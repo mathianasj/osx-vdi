@@ -601,6 +601,10 @@ static OSStatus VDIMic_StartIO(AudioServerPlugInDriverRef d, AudioObjectID id, U
         gIOCycleCount = 0;
         gReadOffset = 0;
         gReadInitialized = false;
+        if (gShmPtr != NULL) {
+            volatile UInt32 *ioActivePtr = (volatile UInt32 *)((char *)gShmPtr + 8);
+            *ioActivePtr = 1;
+        }
         driverLog("StartIO INPUT: client=%u shm=%s ptr=%p", clientID, shmOk ? "ok" : "FAIL", gShmPtr);
     } else {
         gWriterDeviceRunning = 1;
@@ -614,6 +618,10 @@ static OSStatus VDIMic_StopIO(AudioServerPlugInDriverRef d, AudioObjectID id, UI
     pthread_mutex_lock(&gMutex);
     if (id == kObjectID_InputDevice) {
         gInputDeviceRunning = 0;
+        if (gShmPtr != NULL) {
+            volatile UInt32 *ioActivePtr = (volatile UInt32 *)((char *)gShmPtr + 8);
+            *ioActivePtr = 0;
+        }
         CloseSharedMemory();
         gReadOffset = 0;
         gReadInitialized = false;

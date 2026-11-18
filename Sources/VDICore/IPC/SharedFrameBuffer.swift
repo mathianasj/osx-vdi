@@ -35,8 +35,7 @@ public final class SharedFrameBuffer {
             mappedMemory = mmap(nil, totalSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
             if mappedMemory != MAP_FAILED && mappedMemory != nil {
                 let mem = mappedMemory!
-                mem.storeBytes(of: UInt64(0), toByteOffset: 0, as: UInt64.self)
-                memset(mem + 12, 0, Header.size - 12)
+                memset(mem, 0, Header.size)
                 memset(mem + Header.size, 0, totalSize - Header.size)
                 print("[SharedFrameBuffer] Reopened existing: \(shmName) (\(totalSize) bytes)")
                 return true
@@ -71,8 +70,7 @@ public final class SharedFrameBuffer {
         }
 
         let mem = mappedMemory!
-        mem.storeBytes(of: UInt64(0), toByteOffset: 0, as: UInt64.self)
-        memset(mem + 12, 0, Header.size - 12)
+        memset(mem, 0, Header.size)
         memset(mem + Header.size, 0, totalSize - Header.size)
         print("[SharedFrameBuffer] Created: \(shmName) (\(totalSize) bytes)")
         return true
