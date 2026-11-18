@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import CoreAudio
+import AudioToolbox
 import VDICore
 import os
 import AVFAudio
@@ -9,8 +10,8 @@ final class VoiceIOManager {
     private var engine: AVAudioEngine?
     private var sourceNode: AVAudioSourceNode?
     private var playbackFormat: AVAudioFormat?
-    private var configuredSampleRate: Double = 0
-    private var configuredChannels: UInt32 = 0
+    fileprivate var configuredSampleRate: Double = 0
+    fileprivate var configuredChannels: UInt32 = 0
     private var outputDeviceID: AudioDeviceID?
     private var inputDeviceID: AudioDeviceID?
 
@@ -27,10 +28,15 @@ final class VoiceIOManager {
     private var renderStallChecks: Int = 0
     var onMicSample: ((Data, UInt32, UInt16) -> Void)?
 
-    // Mic capture via AVCaptureSession (fully independent of playback engine)
+    // AVCaptureSession fallback mic (used when VPIO unavailable)
     private var micCaptureSession: AVCaptureSession?
     private var micAudioOutput: AVCaptureAudioDataOutput?
     private var micDelegate: MicCaptureDelegate?
+
+    // AudioToolbox VPIO (the proper echo-cancellation path)
+    fileprivate var vpioUnit: AudioUnit?
+    private var vpioActive = false
+    fileprivate var vpioJitterBuffer: JitterBuffer?
 
     private static let micLogPath = "/tmp/vdi-mic-client.log"
     private static var micLogFile: FileHandle? = {
@@ -52,6 +58,23 @@ final class VoiceIOManager {
     func play(header: AudioFrameHeader, data: Data) {
         let sampleRate = Double(header.sampleRate)
         let channels = UInt32(header.channels)
+
+        if vpioActive {
+            if sampleRate != configuredSampleRate {
+                micLog("VPIO: sample rate changed \(configuredSampleRate) -> \(sampleRate), restarting")
+                stopVPIO()
+                if micCaptureActive, startVPIO(sampleRate: sampleRate, channels: channels) {
+                    if let jb = vpioJitterBuffer {
+                        feedVPIO(data: data, channels: channels, jitterBuffer: jb)
+                    }
+                    return
+                }
+                configurePlaybackEngine(sampleRate: sampleRate, channels: channels)
+            } else if let jb = vpioJitterBuffer {
+                feedVPIO(data: data, channels: channels, jitterBuffer: jb)
+                return
+            }
+        }
 
         if !playbackActive || sampleRate != configuredSampleRate || channels != configuredChannels {
             configurePlaybackEngine(sampleRate: sampleRate, channels: channels)
@@ -110,14 +133,38 @@ final class VoiceIOManager {
         }
     }
 
+    private func feedVPIO(data: Data, channels: UInt32, jitterBuffer jb: JitterBuffer) {
+        let frameCount = Int(data.count) / (Int(channels) * MemoryLayout<Float>.size)
+        guard frameCount > 0 else { return }
+
+        data.withUnsafeBytes { rawBuf in
+            guard let src = rawBuf.baseAddress?.assumingMemoryBound(to: Float.self) else { return }
+            jb.write(data: src, frameCount: frameCount, srcChannels: Int(channels))
+        }
+
+        playFrameCount += 1
+        if playFrameCount == 1 {
+            micLog("VPIO: First audio frame received: \(frameCount) frames, \(channels)ch")
+        }
+        if playFrameCount % 500 == 0 {
+            micLog("VPIO Stats: \(playFrameCount) pkts, buf=\(jb.storedFrameCount) preB=\(jb.isPreBuffered), renders=\(jb.readCount) audio=\(jb.readAudioCount) underruns=\(jb.underrunCount)")
+        }
+    }
+
     func setOutputDevice(_ deviceID: AudioDeviceID) {
         self.outputDeviceID = deviceID
-        if engine != nil {
+        if vpioActive {
+            micLog("Output device changed to \(deviceID), restarting VPIO")
+            let sr = configuredSampleRate > 0 ? configuredSampleRate : 48000
+            let ch = configuredChannels > 0 ? configuredChannels : 2
+            stopVPIO()
+            startVPIO(sampleRate: sr, channels: ch)
+        } else if engine != nil {
             configurePlaybackEngine(sampleRate: configuredSampleRate, channels: configuredChannels)
         }
     }
 
-    // MARK: - Mic Capture (AVCaptureSession, independent of playback)
+    // MARK: - Mic Capture
 
     func startMicCapture(inputDeviceID: AudioDeviceID? = nil) {
         self.inputDeviceID = inputDeviceID
@@ -125,12 +172,29 @@ final class VoiceIOManager {
         micBufferCount = 0
 
         micLog("startMicCapture: inputDevice=\(inputDeviceID.map { String($0) } ?? "default")")
-        startMicCaptureSession()
+
+        let sr = configuredSampleRate > 0 ? configuredSampleRate : 48000
+        let ch = configuredChannels > 0 ? configuredChannels : 2
+
+        if startVPIO(sampleRate: sr, channels: ch) {
+            micLog("VPIO active — echo cancellation enabled")
+            teardownPlayback()
+        } else {
+            micLog("VPIO failed — falling back to AVCaptureSession mic (no echo cancellation)")
+            startMicCaptureSession()
+        }
     }
 
     func stopMicCapture() {
         micCaptureActive = false
-        stopMicCaptureSession()
+        if vpioActive {
+            stopVPIO()
+            if playbackActive || configuredSampleRate > 0 {
+                configurePlaybackEngine(sampleRate: configuredSampleRate, channels: configuredChannels)
+            }
+        } else {
+            stopMicCaptureSession()
+        }
     }
 
     func setInputDevice(_ deviceID: AudioDeviceID?) {
@@ -138,10 +202,182 @@ final class VoiceIOManager {
         self.inputDeviceID = deviceID
         if micCaptureActive && changed {
             micLog("Switching input device to \(deviceID.map { String($0) } ?? "default")")
-            stopMicCaptureSession()
-            startMicCaptureSession()
+            if vpioActive {
+                let sr = configuredSampleRate > 0 ? configuredSampleRate : 48000
+                let ch = configuredChannels > 0 ? configuredChannels : 2
+                stopVPIO()
+                if !startVPIO(sampleRate: sr, channels: ch) {
+                    startMicCaptureSession()
+                }
+            } else {
+                stopMicCaptureSession()
+                startMicCaptureSession()
+            }
         }
     }
+
+    // MARK: - AudioToolbox VPIO (proper echo cancellation)
+
+    @discardableResult
+    private func startVPIO(sampleRate: Double, channels: UInt32) -> Bool {
+        stopVPIO()
+
+        var desc = AudioComponentDescription(
+            componentType: kAudioUnitType_Output,
+            componentSubType: kAudioUnitSubType_VoiceProcessingIO,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+
+        guard let component = AudioComponentFindNext(nil, &desc) else {
+            micLog("VPIO: AudioComponentFindNext failed — no VPIO component")
+            return false
+        }
+
+        var unit: AudioUnit?
+        var status = AudioComponentInstanceNew(component, &unit)
+        guard status == noErr, let au = unit else {
+            micLog("VPIO: AudioComponentInstanceNew failed: \(status)")
+            return false
+        }
+
+        // Enable input (bus 1) for mic capture
+        var enableInput: UInt32 = 1
+        status = AudioUnitSetProperty(au, kAudioOutputUnitProperty_EnableIO,
+                                      kAudioUnitScope_Input, 1,
+                                      &enableInput, UInt32(MemoryLayout<UInt32>.size))
+        guard status == noErr else {
+            micLog("VPIO: Enable input failed: \(status)")
+            AudioComponentInstanceDispose(au)
+            return false
+        }
+
+        // Enable output (bus 0) for speaker playback / AEC reference
+        var enableOutput: UInt32 = 1
+        status = AudioUnitSetProperty(au, kAudioOutputUnitProperty_EnableIO,
+                                      kAudioUnitScope_Output, 0,
+                                      &enableOutput, UInt32(MemoryLayout<UInt32>.size))
+        guard status == noErr else {
+            micLog("VPIO: Enable output failed: \(status)")
+            AudioComponentInstanceDispose(au)
+            return false
+        }
+
+        // VPIO creates an aggregate device internally.
+        // Set the output device — VPIO will use the default input mic.
+        if let deviceID = outputDeviceID {
+            var devID = deviceID
+            status = AudioUnitSetProperty(au, kAudioOutputUnitProperty_CurrentDevice,
+                                          kAudioUnitScope_Global, 0,
+                                          &devID, UInt32(MemoryLayout<AudioDeviceID>.size))
+            if status != noErr {
+                micLog("VPIO: Set output device \(deviceID) failed: \(status) — using default")
+            }
+        }
+
+        // Use Float32 mono for the VPIO processing path (most compatible)
+        var streamDesc = AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagIsNonInterleaved,
+            mBytesPerPacket: UInt32(MemoryLayout<Float>.size),
+            mFramesPerPacket: 1,
+            mBytesPerFrame: UInt32(MemoryLayout<Float>.size),
+            mChannelsPerFrame: 1,
+            mBitsPerChannel: 32,
+            mReserved: 0
+        )
+
+        // Set format on bus 0 input scope (what we feed to speaker)
+        status = AudioUnitSetProperty(au, kAudioUnitProperty_StreamFormat,
+                                      kAudioUnitScope_Input, 0,
+                                      &streamDesc, UInt32(MemoryLayout<AudioStreamBasicDescription>.size))
+        guard status == noErr else {
+            micLog("VPIO: Set bus 0 input format failed: \(status)")
+            AudioComponentInstanceDispose(au)
+            return false
+        }
+
+        // Set format on bus 1 output scope (what we read from mic)
+        status = AudioUnitSetProperty(au, kAudioUnitProperty_StreamFormat,
+                                      kAudioUnitScope_Output, 1,
+                                      &streamDesc, UInt32(MemoryLayout<AudioStreamBasicDescription>.size))
+        guard status == noErr else {
+            micLog("VPIO: Set bus 1 output format failed: \(status)")
+            AudioComponentInstanceDispose(au)
+            return false
+        }
+
+        // Create jitter buffer for VPIO playback feed
+        let capacityFrames = Int(sampleRate) / 2
+        let preBufferFrames = Int(sampleRate) * 150 / 1000
+        let jb = JitterBuffer(capacityFrames: capacityFrames, preBufferFrames: preBufferFrames, channels: 1)
+        self.vpioJitterBuffer = jb
+
+        // Bus 0 render callback: feeds playback audio to speaker (AEC reference)
+        var renderCallback = AURenderCallbackStruct(
+            inputProc: vpioRenderCallback,
+            inputProcRefCon: Unmanaged.passUnretained(self).toOpaque()
+        )
+        status = AudioUnitSetProperty(au, kAudioUnitProperty_SetRenderCallback,
+                                      kAudioUnitScope_Input, 0,
+                                      &renderCallback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+        guard status == noErr else {
+            micLog("VPIO: Set render callback failed: \(status)")
+            AudioComponentInstanceDispose(au)
+            return false
+        }
+
+        // Bus 1 input callback: receives echo-cancelled mic audio
+        var inputCallback = AURenderCallbackStruct(
+            inputProc: vpioInputCallback,
+            inputProcRefCon: Unmanaged.passUnretained(self).toOpaque()
+        )
+        status = AudioUnitSetProperty(au, kAudioOutputUnitProperty_SetInputCallback,
+                                      kAudioUnitScope_Global, 1,
+                                      &inputCallback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+        guard status == noErr else {
+            micLog("VPIO: Set input callback failed: \(status)")
+            AudioComponentInstanceDispose(au)
+            return false
+        }
+
+        status = AudioUnitInitialize(au)
+        guard status == noErr else {
+            micLog("VPIO: AudioUnitInitialize failed: \(status)")
+            AudioComponentInstanceDispose(au)
+            return false
+        }
+
+        status = AudioOutputUnitStart(au)
+        guard status == noErr else {
+            micLog("VPIO: AudioOutputUnitStart failed: \(status)")
+            AudioUnitUninitialize(au)
+            AudioComponentInstanceDispose(au)
+            return false
+        }
+
+        self.vpioUnit = au
+        self.vpioActive = true
+        self.configuredSampleRate = sampleRate
+        self.configuredChannels = channels
+        micLog("VPIO started: \(sampleRate)Hz mono, output=\(outputDeviceID.map{String($0)} ?? "default"), input=\(inputDeviceID.map{String($0)} ?? "default")")
+        return true
+    }
+
+    private func stopVPIO() {
+        guard let au = vpioUnit else { return }
+        AudioOutputUnitStop(au)
+        AudioUnitUninitialize(au)
+        AudioComponentInstanceDispose(au)
+        vpioUnit = nil
+        vpioActive = false
+        vpioJitterBuffer = nil
+        micLog("VPIO stopped")
+    }
+
+    // MARK: - AVCaptureSession Mic Fallback
 
     private func startMicCaptureSession() {
         stopMicCaptureSession()
@@ -222,7 +458,7 @@ final class VoiceIOManager {
         session.startRunning()
         self.micCaptureSession = session
         self.micAudioOutput = output
-        micLog("Mic capture session started: device=\(audioDevice.localizedName)")
+        micLog("Mic capture session started (fallback, no AEC): device=\(audioDevice.localizedName)")
     }
 
     private func stopMicCaptureSession() {
@@ -232,7 +468,7 @@ final class VoiceIOManager {
         micDelegate = nil
     }
 
-    // MARK: - Playback Engine (output only, no input node interaction)
+    // MARK: - Playback Engine (output only, fallback when VPIO unavailable)
 
     private func configurePlaybackEngine(sampleRate: Double, channels: UInt32) {
         let wasRunning = engine != nil
@@ -329,6 +565,7 @@ final class VoiceIOManager {
 
     func stop() {
         micCaptureActive = false
+        stopVPIO()
         stopMicCaptureSession()
         teardownPlayback()
     }
@@ -340,12 +577,75 @@ final class VoiceIOManager {
         jitterBuffer = nil
         playbackFormat = nil
         playbackActive = false
-        configuredSampleRate = 0
-        configuredChannels = 0
     }
 }
 
-// MARK: - Mic Capture Delegate
+// MARK: - VPIO Callbacks (C-function, real-time safe)
+
+private func vpioRenderCallback(
+    inRefCon: UnsafeMutableRawPointer,
+    ioActionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
+    inTimeStamp: UnsafePointer<AudioTimeStamp>,
+    inBusNumber: UInt32,
+    inNumberFrames: UInt32,
+    ioData: UnsafeMutablePointer<AudioBufferList>?
+) -> OSStatus {
+    guard let ioData = ioData else { return kAudio_ParamError }
+
+    let mgr = Unmanaged<VoiceIOManager>.fromOpaque(inRefCon).takeUnretainedValue()
+    guard let jb = mgr.vpioJitterBuffer else {
+        let abl = UnsafeMutableAudioBufferListPointer(ioData)
+        for buf in abl {
+            if let data = buf.mData { memset(data, 0, Int(buf.mDataByteSize)) }
+        }
+        return noErr
+    }
+
+    let _ = jb.read(into: ioData, frameCount: Int(inNumberFrames))
+    return noErr
+}
+
+private func vpioInputCallback(
+    inRefCon: UnsafeMutableRawPointer,
+    ioActionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
+    inTimeStamp: UnsafePointer<AudioTimeStamp>,
+    inBusNumber: UInt32,
+    inNumberFrames: UInt32,
+    ioData: UnsafeMutablePointer<AudioBufferList>?
+) -> OSStatus {
+    let mgr = Unmanaged<VoiceIOManager>.fromOpaque(inRefCon).takeUnretainedValue()
+    guard let au = mgr.vpioUnit else { return kAudio_ParamError }
+
+    var bufferList = AudioBufferList(
+        mNumberBuffers: 1,
+        mBuffers: AudioBuffer(
+            mNumberChannels: 1,
+            mDataByteSize: inNumberFrames * UInt32(MemoryLayout<Float>.size),
+            mData: nil
+        )
+    )
+
+    let bufferSize = Int(inNumberFrames) * MemoryLayout<Float>.size
+    let rawBuffer = UnsafeMutableRawPointer.allocate(byteCount: bufferSize, alignment: MemoryLayout<Float>.alignment)
+    bufferList.mBuffers.mData = rawBuffer
+    defer { rawBuffer.deallocate() }
+
+    let status = AudioUnitRender(au, ioActionFlags, inTimeStamp, 1, inNumberFrames, &bufferList)
+    guard status == noErr else { return status }
+
+    let floatPtr = rawBuffer.assumingMemoryBound(to: Float.self)
+    let monoData = Data(bytes: floatPtr, count: bufferSize)
+
+    // We're on a real-time thread — dispatch the callback
+    let sampleRate = mgr.configuredSampleRate
+    DispatchQueue.global(qos: .userInteractive).async {
+        mgr.onMicSample?(monoData, UInt32(sampleRate), 1)
+    }
+
+    return noErr
+}
+
+// MARK: - Mic Capture Delegate (AVCaptureSession fallback)
 
 private final class MicCaptureDelegate: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     let handler: (AVAudioPCMBuffer, AVAudioFormat) -> Void
