@@ -123,7 +123,6 @@ final class ServerSession {
             startBitrateAdaptation()
             virtualMicrophone.start()
             virtualCamera.start()
-            send(.requestClientMicrophone)
             Task { await sendWindowList() }
 
         case .hello where state == .connected:
