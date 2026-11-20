@@ -35,6 +35,7 @@ final class RemoteWindowView {
     private let videoLayer: CALayer
     var onResize: ((Int, Int) -> Void)?
     var onDisplayChanged: ((Int) -> Void)?
+    var onFirstFrame: (() -> Void)?
     private var resizeObserver: Any?
     private var fullscreenObserver: Any?
     private var exitFullscreenObserver: Any?
@@ -131,7 +132,9 @@ final class RemoteWindowView {
         guard !hasShownFirstFrame else { return }
         hasShownFirstFrame = true
         nsWindow.makeKeyAndOrderFront(nil)
+        nsWindow.zoom(nil)
         nsWindow.makeFirstResponder(nsWindow.contentView)
+        onFirstFrame?()
     }
 
     func updateTitle(_ title: String) {

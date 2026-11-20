@@ -27,6 +27,7 @@ public struct InputEvent: Codable, Sendable {
     public var scrollPhase: UInt
     public var scrollMomentumPhase: UInt
     public var characters: String?
+    public var clickCount: Int
 
     public init(
         windowID: UInt32,
@@ -41,7 +42,8 @@ public struct InputEvent: Codable, Sendable {
         scrollIsContinuous: Bool = false,
         scrollPhase: UInt = 0,
         scrollMomentumPhase: UInt = 0,
-        characters: String? = nil
+        characters: String? = nil,
+        clickCount: Int = 1
     ) {
         self.windowID = windowID
         self.type = type
@@ -56,6 +58,7 @@ public struct InputEvent: Codable, Sendable {
         self.scrollPhase = scrollPhase
         self.scrollMomentumPhase = scrollMomentumPhase
         self.characters = characters
+        self.clickCount = clickCount
     }
 }
 
@@ -124,6 +127,7 @@ public enum ControlMessage: Codable, Sendable {
     case windowList([WindowInfo])
     case selectWindow(windowID: UInt32)
     case deselectWindow(windowID: UInt32)
+    case closeWindow(windowID: UInt32)
     case streamStarted(windowID: UInt32, width: Int, height: Int)
     case streamStopped(windowID: UInt32)
     case windowCreated(WindowInfo)

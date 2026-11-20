@@ -64,7 +64,8 @@ final class InputForwarder {
                 x: nx,
                 y: ny,
                 button: Int(nsEvent.buttonNumber),
-                modifiers: UInt64(nsEvent.modifierFlags.rawValue)
+                modifiers: UInt64(nsEvent.modifierFlags.rawValue),
+                clickCount: nsEvent.clickCount
             )
 
         case .scrollWheel:

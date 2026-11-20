@@ -198,6 +198,15 @@ final class ConnectionManager {
                     self?.sendControl(.resizeWindow(windowID: windowID, width: width, height: height))
                 }
 
+                view.onFirstFrame = { [weak self] in
+                    guard let contentView = view.nsWindow.contentView else { return }
+                    let size = contentView.bounds.size
+                    if Int(size.width) != width || Int(size.height) != height {
+                        print("[ConnectionManager] Initial resize: \(Int(size.width))x\(Int(size.height))")
+                        self?.sendControl(.resizeWindow(windowID: windowID, width: Int(size.width), height: Int(size.height)))
+                    }
+                }
+
                 view.onDisplayChanged = { [weak self] displayIndex in
                     self?.sendControl(.moveToDisplay(windowID: windowID, displayIndex: displayIndex))
                 }
@@ -207,6 +216,16 @@ final class ConnectionManager {
                     self?.sendControl(.inputEvent(event))
                 }
                 forwarder.start()
+
+                NotificationCenter.default.addObserver(
+                    forName: NSWindow.willCloseNotification,
+                    object: view.nsWindow,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.sendControl(.closeWindow(windowID: windowID))
+                    self?.windowSessions[windowID]?.forwarder?.stop()
+                    self?.windowSessions.removeValue(forKey: windowID)
+                }
 
                 NotificationCenter.default.addObserver(
                     forName: NSWindow.didBecomeKeyNotification,

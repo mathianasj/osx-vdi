@@ -2,9 +2,14 @@ import AppKit
 import CoreGraphics
 import VDICore
 
+@_silgen_name("_AXUIElementGetWindow")
+func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: inout CGWindowID) -> AXError
+
 final class InputHandler {
     private var lastActivePID: pid_t?
+    private var lastRaisedWindowID: UInt32?
     private var pidCache: [String: pid_t] = [:]
+    private let eventSource = CGEventSource(stateID: .hidSystemState)
 
     func handle(_ event: InputEvent, windowInfo: WindowInfo) {
         switch event.type {
@@ -51,39 +56,32 @@ final class InputHandler {
             return
         }
 
-        guard let cgEvent = CGEvent(mouseEventSource: nil, mouseType: mouseType, mouseCursorPosition: point, mouseButton: mouseButton) else {
+        guard let cgEvent = CGEvent(mouseEventSource: eventSource, mouseType: mouseType, mouseCursorPosition: point, mouseButton: mouseButton) else {
             return
         }
         cgEvent.flags = CGEventFlags(rawValue: event.modifiers)
 
         if event.type == .mouseDown || event.type == .mouseUp ||
            event.type == .rightMouseDown || event.type == .rightMouseUp {
-            cgEvent.setIntegerValueField(.mouseEventClickState, value: 1)
+            cgEvent.setIntegerValueField(.mouseEventClickState, value: Int64(event.clickCount))
         }
-
-        let useGlobalPost = event.type == .mouseDown || event.type == .mouseUp ||
-                            event.type == .rightMouseDown || event.type == .rightMouseUp ||
-                            event.type == .mouseDragged
 
         if let pid = pidForWindow(windowInfo) {
             activateAppIfNeeded(pid)
+            if lastRaisedWindowID != windowInfo.windowID {
+                raiseWindow(windowInfo)
+                lastRaisedWindowID = windowInfo.windowID
+            }
         }
         CGWarpMouseCursorPosition(point)
-
-        if useGlobalPost {
-            cgEvent.post(tap: .cghidEventTap)
-        } else if let pid = pidForWindow(windowInfo) {
-            cgEvent.postToPid(pid)
-        } else {
-            cgEvent.post(tap: .cghidEventTap)
-        }
+        cgEvent.post(tap: .cghidEventTap)
     }
 
     private func handleScrollEvent(_ event: InputEvent, windowInfo: WindowInfo) {
         let dy = roundAwayFromZero(event.scrollDeltaY)
         let dx = roundAwayFromZero(event.scrollDeltaX)
 
-        guard let cgEvent = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) else { return }
+        guard let cgEvent = CGEvent(scrollWheelEvent2Source: eventSource, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) else { return }
 
         cgEvent.setDoubleValueField(.scrollWheelEventPointDeltaAxis1, value: event.scrollDeltaY)
         cgEvent.setDoubleValueField(.scrollWheelEventPointDeltaAxis2, value: event.scrollDeltaX)
@@ -109,28 +107,32 @@ final class InputHandler {
 
     private func handleKeyEvent(_ event: InputEvent, windowInfo: WindowInfo) {
         let keyDown = event.type == .keyDown
-        guard let cgEvent = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(event.keyCode), keyDown: keyDown) else { return }
+        guard let cgEvent = CGEvent(keyboardEventSource: eventSource, virtualKey: CGKeyCode(event.keyCode), keyDown: keyDown) else { return }
         cgEvent.flags = CGEventFlags(rawValue: event.modifiers)
+
+        let flags = CGEventFlags(rawValue: event.modifiers)
+        let hasShortcutModifier = flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
+
+        if !hasShortcutModifier, let chars = event.characters, !chars.isEmpty {
+            let unichars = Array(chars.utf16)
+            cgEvent.keyboardSetUnicodeString(stringLength: unichars.count, unicodeString: unichars)
+        }
 
         if let pid = pidForWindow(windowInfo) {
             activateAppIfNeeded(pid)
-            cgEvent.postToPid(pid)
-        } else {
-            cgEvent.post(tap: .cghidEventTap)
         }
+        cgEvent.post(tap: .cghidEventTap)
     }
 
     private func handleFlagsChanged(_ event: InputEvent, windowInfo: WindowInfo) {
-        guard let cgEvent = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(event.keyCode), keyDown: true) else { return }
+        guard let cgEvent = CGEvent(keyboardEventSource: eventSource, virtualKey: CGKeyCode(event.keyCode), keyDown: true) else { return }
         cgEvent.type = .flagsChanged
         cgEvent.flags = CGEventFlags(rawValue: event.modifiers)
 
         if let pid = pidForWindow(windowInfo) {
             activateAppIfNeeded(pid)
-            cgEvent.postToPid(pid)
-        } else {
-            cgEvent.post(tap: .cghidEventTap)
         }
+        cgEvent.post(tap: .cghidEventTap)
     }
 
     private func activateAppIfNeeded(_ pid: pid_t) {
@@ -138,6 +140,22 @@ final class InputHandler {
         lastActivePID = pid
         if let app = NSRunningApplication(processIdentifier: pid) {
             app.activate()
+        }
+    }
+
+    private func raiseWindow(_ windowInfo: WindowInfo) {
+        guard let pid = pidForWindow(windowInfo) else { return }
+        let appElement = AXUIElementCreateApplication(pid)
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let axWindows = windowsRef as? [AXUIElement] else { return }
+
+        for axWindow in axWindows {
+            var wid: CGWindowID = 0
+            if _AXUIElementGetWindow(axWindow, &wid) == .success, wid == windowInfo.windowID {
+                AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
+                return
+            }
         }
     }
 

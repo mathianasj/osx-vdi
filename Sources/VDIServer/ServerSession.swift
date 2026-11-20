@@ -137,6 +137,13 @@ final class ServerSession {
         case .deselectWindow(let windowID):
             Task { await stopStreaming(windowID: windowID) }
 
+        case .closeWindow(let windowID):
+            print("[ServerSession] Close window \(windowID)")
+            if let stream = streams[windowID] {
+                closeServerWindow(windowID: windowID, windowInfo: stream.info)
+            }
+            Task { await stopStreaming(windowID: windowID) }
+
         case .resizeWindow(let windowID, let width, let height):
             print("[ServerSession] Resize request: window \(windowID) to \(width)x\(height)")
             Task { await restartStreaming(windowID: windowID, width: width, height: height) }
@@ -317,6 +324,24 @@ final class ServerSession {
             }
         } else {
             print("[ServerSession] Menu action failed: \(bundleID) path=\(path)")
+        }
+    }
+
+    private func autoStreamAllWindows() async {
+        do {
+            let windows = try await windowManager.discoverWindows()
+            let streamable = windows.filter {
+                $0.bounds.width >= 200 && $0.bounds.height >= 200 &&
+                $0.windowLayer == 0 && $0.title != nil
+            }
+            print("[ServerSession] Auto-streaming \(streamable.count) windows")
+            for window in streamable {
+                if streams[window.windowID] == nil {
+                    await startStreaming(windowID: window.windowID)
+                }
+            }
+        } catch {
+            print("[ServerSession] Failed to auto-stream: \(error)")
         }
     }
 
@@ -525,6 +550,39 @@ final class ServerSession {
         } catch {
             print("[ServerSession] Failed to restart stream: \(error)")
         }
+    }
+
+    private func closeServerWindow(windowID: UInt32, windowInfo: WindowInfo) {
+        guard let pid = findPid(for: windowInfo) else {
+            print("[ServerSession] Could not find PID for window close")
+            return
+        }
+
+        let appElement = AXUIElementCreateApplication(pid)
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let axWindows = windowsRef as? [AXUIElement] else {
+            print("[ServerSession] Could not get AX windows for close")
+            return
+        }
+
+        for axWindow in axWindows {
+            var wid: CGWindowID = 0
+            if _AXUIElementGetWindow(axWindow, &wid) == .success, wid == windowID {
+                let result = AXUIElementPerformAction(axWindow, kAXPressAction as CFString)
+                if result != .success {
+                    var closeButton: CFTypeRef?
+                    if AXUIElementCopyAttributeValue(axWindow, kAXCloseButtonAttribute as CFString, &closeButton) == .success {
+                        AXUIElementPerformAction(closeButton as! AXUIElement, kAXPressAction as CFString)
+                        print("[ServerSession] Closed window \(windowID) via close button")
+                    } else {
+                        print("[ServerSession] Failed to close window \(windowID)")
+                    }
+                }
+                return
+            }
+        }
+        print("[ServerSession] Could not find AX window \(windowID) to close")
     }
 
     private func resizeServerWindow(windowID: UInt32, windowInfo: WindowInfo, width: Int, height: Int) {
@@ -810,23 +868,35 @@ final class ServerSession {
 
         let avgLatency = sendLatencies.reduce(0, +) / Double(sendLatencies.count)
 
-        let targetLevel: VideoEncoder.BitrateLevel
+        let totalBudget: Int
         if avgLatency < 0.005 {
-            targetLevel = .high
+            totalBudget = VideoEncoder.BitrateLevel.high.rawValue
         } else if avgLatency < 0.015 {
-            targetLevel = .excellent
+            totalBudget = VideoEncoder.BitrateLevel.excellent.rawValue
         } else if avgLatency < 0.030 {
-            targetLevel = .good
+            totalBudget = VideoEncoder.BitrateLevel.good.rawValue
         } else {
-            targetLevel = .fair
+            totalBudget = VideoEncoder.BitrateLevel.fair.rawValue
         }
 
-        for (_, stream) in streams {
-            let current = stream.encoder.currentBitrate
-            let target = targetLevel.rawValue
+        let streamCount = streams.count
+        guard streamCount > 0 else { return }
 
+        for (windowID, stream) in streams {
+            let target: Int
+            if streamCount == 1 {
+                target = totalBudget
+            } else if windowID == activeAudioWindowID {
+                target = totalBudget * 70 / 100
+            } else {
+                let bgCount = max(1, streamCount - 1)
+                target = max(VideoEncoder.BitrateLevel.poor.rawValue, totalBudget * 30 / 100 / bgCount)
+            }
+
+            let current = stream.encoder.currentBitrate
             if target != current {
-                print("[Bitrate] \(current/1_000_000)Mbps → \(target/1_000_000)Mbps (latency=\(String(format: "%.1f", avgLatency * 1000))ms)")
+                let label = windowID == activeAudioWindowID ? "active" : "bg"
+                print("[Bitrate] \(current/1_000_000)Mbps → \(target/1_000_000)Mbps (\(label), latency=\(String(format: "%.1f", avgLatency * 1000))ms, \(streamCount) streams)")
                 stream.encoder.setBitrate(target)
                 if target > current {
                     stream.encoder.forceKeyframe()
